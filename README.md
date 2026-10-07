@@ -1,11 +1,16 @@
 # Drug Pricing Intelligence Agent (Azure)
 
-An AI agent that answers questions about US drug prices and shortages, for example:
+A multi-agent system for US drug prices and shortages, built on **public data only**
+(CMS NADAC, FDA NDC Directory, openFDA Drug Shortages).
 
-> *"Which generic drugs had the biggest price jump this quarter, and is a shortage driving it?"*
+- **Ask agent** answers questions on demand, for example:
+  > *"Which generic drugs had the biggest price jump this quarter, and is a shortage driving it?"*
+- **Price-Watch team** runs every week without being asked: it finds unusual price moves, sends one
+  investigator agent per signal to find the cause, verifies every number against the data, and drafts a
+  ranked brief that a person approves before it is sent.
 
-It is built on **public data only** (CMS NADAC, FDA NDC Directory, openFDA Drug Shortages), with a
-Databricks medallion pipeline underneath and an agent on Azure AI Foundry on top.
+Both reach the data through one **MCP (Model Context Protocol) tool server** over a tested Databricks
+medallion pipeline.
 
 ```mermaid
 flowchart LR
@@ -13,17 +18,23 @@ flowchart LR
         A[CMS NADAC<br/>weekly drug acquisition cost]
         B[FDA NDC Directory]
         C[openFDA Drug Shortages]
+        D[openFDA Drug Labels]
     end
     subgraph DBX[Azure Databricks + Unity Catalog]
-        L[(Landing volume<br/>raw files)] --> BR[(Bronze<br/>raw tables)]
-        BR --> SV[(Silver<br/>typed, 11-digit NDC)]
-        SV --> GD[(Gold<br/>SCD2 history,<br/>price changes,<br/>current prices)]
-        DQ{{Data-quality checks}} -.-> SV & GD
+        L[(Landing volume)] --> BR[(Bronze)] --> SV[(Silver)] --> GD[(Gold<br/>SCD2 history,<br/>price changes,<br/>current prices)]
+        DQ{{DQ checks}} -.-> SV & GD
     end
     A & B & C --> L
-    GD --> AG[Agent: Foundry Agent Service<br/>SQL tool + label search]
-    AG --> UI[FastAPI + UI]
-    style AG stroke-dasharray: 5 5
+    D --> AIS[(Azure AI Search<br/>hybrid + rerank)]
+    GD & AIS --> MCP[dpa-mcp server<br/>read-only tools]
+    MCP --> ASK[Ask agent<br/>Foundry Agent Service]
+    MCP --> PW[Price-Watch workflow<br/>detect → investigate ×N → verify]
+    PW --> HUM{{Human approval}} --> BRIEF[Weekly brief]
+    ASK --> UI[FastAPI + UI]
+    style MCP stroke-dasharray: 5 5
+    style ASK stroke-dasharray: 5 5
+    style PW stroke-dasharray: 5 5
+    style AIS stroke-dasharray: 5 5
     style UI stroke-dasharray: 5 5
 ```
 
@@ -33,11 +44,20 @@ Dashed boxes are later phases. **This repo currently contains Phase 1: the data 
 
 | Phase | What | Status |
 |---|---|---|
-| 1 | Ingestion, Bronze/Silver/Gold, SCD2 price history, data-quality checks, CI | ✅ done |
-| 2 | Retrieval: drug labels into Azure AI Search (hybrid search, citations) | next |
-| 3 | Agent: Foundry Agent Service with a safe SQL tool over Gold + label search | |
-| 4 | LLMOps: eval set, tracing in Application Insights, cost per query, guardrails | |
-| 5 | FastAPI + UI, deployed; write-up and demo video | |
+| 1 | Ingestion, Bronze/Silver/Gold, SCD2 price history, data-quality checks, CI, Azure workspace | ✅ done |
+| 1b | First run on real CMS/FDA data in Databricks; unpause the weekly schedule | next |
+| 2 | Drug labels in Azure AI Search: hybrid search, semantic rerank, citations | |
+| 3 | `dpa-mcp` server: read-only tools over Gold, labels and data freshness (managed identity) | |
+| 4 | Ask agent on Azure AI Foundry Agent Service using the MCP tools | |
+| 5 | Price-Watch multi-agent workflow (Microsoft Agent Framework): SQL signal finder, parallel investigators, verifier, human approval | |
+| 6 | Reliability: golden eval set, trajectory evals, calibrated LLM judge, prompt-injection red-team, tracing, model routing and cost per answer, eval-gated CI | |
+| 7 | Terraform, FastAPI + review UI on Container Apps, write-up and demo video | |
+
+### Design principle for the agents
+
+Use an LLM only where judgment is needed. Finding price moves is plain SQL (exact, cheap, repeatable);
+explaining them is agent work; checking the explanation's numbers is code again. Drug label text is
+treated as untrusted input, and every tool is read-only.
 
 ## What Phase 1 builds
 
