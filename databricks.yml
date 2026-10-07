@@ -1,0 +1,68 @@
+# Databricks Asset Bundle: deploys the weekly pipeline as a serverless job.
+#   databricks bundle validate
+#   databricks bundle deploy -t dev
+#   databricks bundle run dpa_pipeline -t dev
+bundle:
+  name: drug-pricing-agent
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds landing/bronze/silver/gold
+    default: dpa
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-REPLACE_ME.azuredatabricks.net  # your Azure Databricks workspace URL
+
+resources:
+  jobs:
+    dpa_pipeline:
+      name: dpa-weekly-pipeline
+      # CMS publishes the NADAC file weekly (Wednesdays US time); run Thursday morning IST.
+      schedule:
+        quartz_cron_expression: "0 30 8 ? * THU"
+        timezone_id: Asia/Kolkata
+        pause_status: PAUSED  # unpause once a manual run succeeds
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: []  # add your email here
+
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "2"  # on older CLIs this field is named `client`
+            dependencies:
+              - requests>=2.31
+
+      tasks:
+        - task_key: ingest
+          environment_key: default
+          max_retries: 2
+          min_retry_interval_millis: 300000
+          spark_python_task:
+            python_file: ./jobs/run.py
+            parameters: ["--step", "ingest", "--catalog", "${var.catalog}"]
+
+        - task_key: bronze
+          depends_on: [{ task_key: ingest }]
+          environment_key: default
+          spark_python_task:
+            python_file: ./jobs/run.py
+            parameters: ["--step", "bronze", "--catalog", "${var.catalog}"]
+
+        - task_key: silver
+          depends_on: [{ task_key: bronze }]
+          environment_key: default
+          spark_python_task:
+            python_file: ./jobs/run.py
+            parameters: ["--step", "silver", "--catalog", "${var.catalog}"]
+
+        - task_key: gold
+          depends_on: [{ task_key: silver }]
+          environment_key: default
+          spark_python_task:
+            python_file: ./jobs/run.py
+            parameters: ["--step", "gold", "--catalog", "${var.catalog}"]
