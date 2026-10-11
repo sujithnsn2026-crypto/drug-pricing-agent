@@ -117,6 +117,34 @@ dpa-eval compare evals/runs/<v1> evals/runs/<v2> # ...and see what it fixed and 
 dpa-eval promote evals/runs/<v2>                # make it the new baseline
 ```
 
+### Deploy the LLMOps infrastructure (not yet deployed)
+
+1. **Pick a model your region offers.** Azure portal → Azure AI Foundry → Model catalog. Note the model name,
+   version and deployment type (e.g. `gpt-4.1-mini`, `2025-04-14`, Global Standard). Set its price in
+   `config/model_prices.yaml` and its deployment name in `evals/ci.yaml`.
+2. **Create the resources** in `rg-dpa` (Log Analytics with a 1 GB/day cap, App Insights, Azure OpenAI, one
+   pinned deployment capped at 30K tokens/min, optional alert):
+   ```bash
+   az deployment group create -g rg-dpa -f infra/main.bicep \
+     -p openAiLocation=<region> modelName=<model> modelVersion=<version> deploymentName=<model> alertEmail=<you>
+   ```
+   Or in the portal: **Deploy a custom template** → **Build your own template** → paste `infra/main.json`.
+   Azure OpenAI bills per token (one full eval run is cents); there is no idle cost.
+3. **Local secrets:** copy `.env.example` to `.env` and fill in the endpoint, key (Azure OpenAI → Keys and
+   Endpoint) and the App Insights connection string.
+4. **First live run, then commit the recording:**
+   ```bash
+   dpa-eval run --mode record --out evals/runs/first
+   dpa-eval gate evals/runs/first --no-baseline
+   dpa-eval promote evals/runs/first
+   git add evals/cassettes evals/baseline && git commit -m "First recorded eval baseline"
+   ```
+   From then on CI replays this cassette and gates every push.
+5. **GitHub Actions:** Settings → Environments → create `azure-openai` with secrets `AZURE_OPENAI_ENDPOINT`,
+   `AZURE_OPENAI_API_KEY`, `APPLICATIONINSIGHTS_CONNECTION_STRING`. Then run the `eval-live` workflow.
+   (Upgrade later: OIDC federated credentials instead of a stored key.)
+6. **Dashboards:** App Insights → Logs → paste the queries in `ops/kql/` and pin them.
+
 ### LLMOps decisions worth explaining
 
 - **Deterministic scoring before LLM judges.** Every gate metric is computed by code: the expected numbers,
