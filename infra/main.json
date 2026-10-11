@@ -1,0 +1,238 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.48.1.52935",
+      "templateHash": "12151674074259915671"
+    }
+  },
+  "parameters": {
+    "namePrefix": {
+      "type": "string",
+      "defaultValue": "dpa",
+      "metadata": {
+        "description": "Short prefix for resource names"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Region for monitoring resources"
+      }
+    },
+    "openAiLocation": {
+      "type": "string",
+      "defaultValue": "[parameters('location')]",
+      "metadata": {
+        "description": "Region for the Azure OpenAI account (model availability differs by region)"
+      }
+    },
+    "modelName": {
+      "type": "string",
+      "defaultValue": "gpt-4.1-mini",
+      "metadata": {
+        "description": "Model to deploy, and its version (check the portal model catalog for what your region offers)"
+      }
+    },
+    "modelVersion": {
+      "type": "string",
+      "defaultValue": "2025-04-14"
+    },
+    "deploymentName": {
+      "type": "string",
+      "defaultValue": "gpt-4.1-mini",
+      "metadata": {
+        "description": "Deployment name the agent passes as --model"
+      }
+    },
+    "deploymentSku": {
+      "type": "string",
+      "defaultValue": "GlobalStandard",
+      "allowedValues": [
+        "GlobalStandard",
+        "DataZoneStandard",
+        "Standard"
+      ]
+    },
+    "capacityKTpm": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "Throughput limit in thousands of tokens per minute (TPM). Small on purpose: caps runaway spend."
+      }
+    },
+    "logDailyCapGb": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Daily ingestion cap for Log Analytics, in GB"
+      }
+    },
+    "alertEmail": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Email for the grounding alert (leave empty to skip the alert)"
+      }
+    }
+  },
+  "variables": {
+    "suffix": "[uniqueString(resourceGroup().id)]",
+    "tags": {
+      "project": "drug-pricing-agent",
+      "component": "llmops"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[format('log-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30,
+        "workspaceCapping": {
+          "dailyQuotaGb": "[parameters('logDailyCapGb')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/components",
+      "apiVersion": "2020-02-02",
+      "name": "[format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
+      "location": "[parameters('location')]",
+      "kind": "other",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "Application_Type": "other",
+        "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "IngestionMode": "LogAnalytics",
+        "RetentionInDays": 30
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2024-10-01",
+      "name": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
+      "location": "[parameters('openAiLocation')]",
+      "kind": "OpenAI",
+      "sku": {
+        "name": "S0"
+      },
+      "tags": "[variables('tags')]",
+      "properties": {
+        "customSubDomainName": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
+        "publicNetworkAccess": "Enabled",
+        "disableLocalAuth": false
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2024-10-01",
+      "name": "[format('{0}/{1}', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')), parameters('deploymentName'))]",
+      "sku": {
+        "name": "[parameters('deploymentSku')]",
+        "capacity": "[parameters('capacityKTpm')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[parameters('modelName')]",
+          "version": "[parameters('modelVersion')]"
+        },
+        "versionUpgradeOption": "NoAutoUpgrade"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('alertEmail')))]",
+      "type": "Microsoft.Insights/actionGroups",
+      "apiVersion": "2023-01-01",
+      "name": "[format('ag-{0}-llmops', parameters('namePrefix'))]",
+      "location": "global",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "groupShortName": "dpa-llmops",
+        "enabled": true,
+        "emailReceivers": [
+          {
+            "name": "owner",
+            "emailAddress": "[parameters('alertEmail')]",
+            "useCommonAlertSchema": true
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[not(empty(parameters('alertEmail')))]",
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-03-15-preview",
+      "name": "[format('alert-{0}-ungrounded-answers', parameters('namePrefix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "displayName": "DPA agent: ungrounded numbers above 5% (1h)",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [
+          "[resourceId('Microsoft.Insights/components', format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+        ],
+        "evaluationFrequency": "PT1H",
+        "windowSize": "PT1H",
+        "criteria": {
+          "allOf": [
+            {
+              "query": "dependencies | where name == \"invoke_agent dpa-ask\" | where tostring(customDimensions[\"dpa.status\"]) == \"answered\" | summarize n = count(), ungrounded = countif(toint(customDimensions[\"dpa.grounding.ungrounded\"]) > 0) | where n >= 20 and 1.0 * ungrounded / n > 0.05",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}-llmops', parameters('namePrefix')))]"
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}-llmops', parameters('namePrefix')))]",
+        "[resourceId('Microsoft.Insights/components', format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "openAiEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2024-10-01').endpoint]"
+    },
+    "openAiAccountName": {
+      "type": "string",
+      "value": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]"
+    },
+    "deploymentName": {
+      "type": "string",
+      "value": "[parameters('deploymentName')]"
+    },
+    "appInsightsName": {
+      "type": "string",
+      "value": "[format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix'))]"
+    }
+  }
+}

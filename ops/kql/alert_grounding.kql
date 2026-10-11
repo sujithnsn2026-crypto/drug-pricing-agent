@@ -1,0 +1,6 @@
+// Use as a scheduled log alert (every 1h, look back 1h): fire when the result has a row.
+dependencies
+| where timestamp > ago(1h) and name == "invoke_agent dpa-ask"
+| where tostring(customDimensions["dpa.status"]) == "answered"
+| summarize n = count(), ungrounded = countif(toint(customDimensions["dpa.grounding.ungrounded"]) > 0)
+| where n >= 20 and 1.0 * ungrounded / n > 0.05

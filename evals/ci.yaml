@@ -1,0 +1,2 @@
+# The deployment CI evaluates by default (replay in `ci`, live in `eval-live`).
+model: gpt-4.1-mini

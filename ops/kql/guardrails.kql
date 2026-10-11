@@ -1,0 +1,11 @@
+// Prompt-injection blocks on the input, and instruction-like text scrubbed from tool output.
+dependencies
+| where name == "invoke_agent dpa-ask"
+| extend block = tostring(customDimensions["dpa.guardrail.input_block"]),
+         scrubbed = toint(customDimensions["dpa.guardrail.sanitized_spans"])
+| summarize questions = count(),
+            input_blocked = countif(isnotempty(block)),
+            injection_blocks = countif(block == "prompt_injection"),
+            answers_with_scrubbed_tool_output = countif(scrubbed > 0)
+          by day = bin(timestamp, 1d)
+| order by day desc

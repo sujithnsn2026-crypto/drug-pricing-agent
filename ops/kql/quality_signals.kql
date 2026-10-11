@@ -1,0 +1,13 @@
+// Online quality proxies. The offline eval is the real quality measure; these catch drift between eval runs.
+dependencies
+| where name == "invoke_agent dpa-ask"
+| extend status = tostring(customDimensions["dpa.status"]),
+         ungrounded = toint(customDimensions["dpa.grounding.ungrounded"]),
+         retries = toint(customDimensions["dpa.grounding.retries"])
+| summarize questions = count(),
+            pct_ungrounded = round(100.0 * countif(ungrounded > 0) / count(), 1),
+            pct_needed_retry = round(100.0 * countif(retries > 0) / count(), 1),
+            step_limit_hits = countif(status == "max_steps"),
+            errors = countif(status == "error")
+          by day = bin(timestamp, 1d)
+| order by day desc

@@ -1,0 +1,11 @@
+# USD per 1M tokens, keyed by Azure OpenAI DEPLOYMENT name (what you pass as --model).
+# These are inputs you maintain. Before quoting a cost figure, confirm the price for your
+# region and deployment type in the Azure portal (model catalog) or the Azure OpenAI pricing page,
+# and update `checked`.
+checked: 2026-10-11
+source: third-party price tracker (cloudprice.net), OpenAI-standard rate; confirm in Azure portal
+models:
+  gpt-4.1-mini:
+    input: 0.40
+    cached_input: 0.10
+    output: 1.60

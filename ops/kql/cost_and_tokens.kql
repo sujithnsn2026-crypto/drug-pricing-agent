@@ -1,0 +1,14 @@
+// Cost and tokens per day and prompt version (one row per answered question).
+dependencies
+| where name == "invoke_agent dpa-ask"
+| extend cost = todouble(customDimensions["dpa.cost.usd"]),
+         in_tok = toint(customDimensions["gen_ai.usage.input_tokens"]),
+         out_tok = toint(customDimensions["gen_ai.usage.output_tokens"]),
+         prompt = strcat(tostring(customDimensions["dpa.prompt.id"]), "@", tostring(customDimensions["dpa.prompt.version"])),
+         model = tostring(customDimensions["gen_ai.request.model"])
+| summarize questions = count(),
+            cost_usd = sum(iff(cost >= 0, cost, 0.0)),
+            avg_cost_usd = avg(iff(cost >= 0, cost, real(null))),
+            avg_input_tokens = avg(in_tok), avg_output_tokens = avg(out_tok)
+          by day = bin(timestamp, 1d), prompt, model
+| order by day desc

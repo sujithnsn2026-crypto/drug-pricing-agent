@@ -9,3 +9,6 @@ metastore_db/
 derby.log
 .databricks/
 .env
+_traces/
+_local_eval/
+evals/runs/

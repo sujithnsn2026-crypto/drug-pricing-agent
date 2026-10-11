@@ -26,19 +26,22 @@ flowchart LR
     end
     A & B & C --> L
     D --> AIS[(Azure AI Search<br/>hybrid + rerank)]
-    GD & AIS --> MCP[dpa-mcp server<br/>read-only tools]
-    MCP --> ASK[Ask agent<br/>Foundry Agent Service]
+    GD --> TOOLS[Read-only tools<br/>+ SQL guard]
+    TOOLS --> ASK[Ask agent<br/>Azure OpenAI tool calling]
+    ASK --> OPS[[LLMOps: prompt registry · OTel traces ·<br/>cost · guardrails · eval gate]]
+    OPS --> APPI[(Application Insights<br/>KQL + alerts)]
+    GD & AIS --> MCP[dpa-mcp server]
     MCP --> PW[Price-Watch workflow<br/>detect → investigate ×N → verify]
     PW --> HUM{{Human approval}} --> BRIEF[Weekly brief]
-    ASK --> UI[FastAPI + UI]
     style MCP stroke-dasharray: 5 5
-    style ASK stroke-dasharray: 5 5
     style PW stroke-dasharray: 5 5
     style AIS stroke-dasharray: 5 5
-    style UI stroke-dasharray: 5 5
+    style HUM stroke-dasharray: 5 5
+    style BRIEF stroke-dasharray: 5 5
 ```
 
-Dashed boxes are later phases. **This repo currently contains Phase 1: the data layer.**
+Dashed boxes are later phases. **Built so far: the data layer (Phase 1) and the Ask agent with its
+LLMOps layer (Phase 4a + 6).**
 
 ## Roadmap
 
@@ -46,11 +49,13 @@ Dashed boxes are later phases. **This repo currently contains Phase 1: the data 
 |---|---|---|
 | 1 | Ingestion, Bronze/Silver/Gold, SCD2 price history, data-quality checks, CI, Azure workspace | ✅ done |
 | 1b | First run on real CMS/FDA data in Databricks; unpause the weekly schedule | next |
+| 4a | Ask agent: Azure OpenAI tool calling over Gold with read-only tools and a parsed SQL guard | ✅ done |
+| 6 | **LLMOps:** golden eval set (38 questions incl. red-team), deterministic scoring, record/replay, eval-gated CI, prompt registry, OpenTelemetry → App Insights, cost per answer, injection + number-grounding guardrails, KQL monitoring, Bicep | ✅ done |
 | 2 | Drug labels in Azure AI Search: hybrid search, semantic rerank, citations | |
-| 3 | `dpa-mcp` server: read-only tools over Gold, labels and data freshness (managed identity) | |
-| 4 | Ask agent on Azure AI Foundry Agent Service using the MCP tools | |
+| 3 | `dpa-mcp` server: the same read-only tools served over MCP (managed identity) | |
+| 4b | Move the Ask agent onto Azure AI Foundry Agent Service using the MCP tools | |
 | 5 | Price-Watch multi-agent workflow (Microsoft Agent Framework): SQL signal finder, parallel investigators, verifier, human approval | |
-| 6 | Reliability: golden eval set, trajectory evals, calibrated LLM judge, prompt-injection red-team, tracing, model routing and cost per answer, eval-gated CI | |
+| 6b | Calibrated LLM judge for free-text quality, trajectory evals, online feedback loop | |
 | 7 | Terraform, FastAPI + review UI on Container Apps, write-up and demo video | |
 
 ### Design principle for the agents
@@ -58,6 +63,79 @@ Dashed boxes are later phases. **This repo currently contains Phase 1: the data 
 Use an LLM only where judgment is needed. Finding price moves is plain SQL (exact, cheap, repeatable);
 explaining them is agent work; checking the explanation's numbers is code again. Drug label text is
 treated as untrusted input, and every tool is read-only.
+
+
+## The Ask agent and its LLMOps layer
+
+```mermaid
+flowchart LR
+    Q[Question] --> IG{Input guard<br/>injection / size}
+    IG -- blocked --> R1[Refusal, 0 tokens]
+    IG --> LOOP
+    subgraph LOOP[Agent loop, max 6 steps]
+        M[Azure OpenAI<br/>prompt from registry] -- tool calls --> T[Read-only tools<br/>search · price · top changes · history · run_sql]
+        T -- SQL --> G[SQL guard<br/>parsed AST, allow-list, LIMIT] --> DB[(Gold via DuckDB<br/>file + network access off)]
+        T -- results --> S[Scrub instruction-like text<br/>from FDA free text] --> M
+    end
+    LOOP --> NG{Number grounding:<br/>every number in a tool result?}
+    NG -- no, once --> M
+    NG --> A[Answer + status, tokens, cost, prompt ref, trace id]
+    LOOP -. spans .-> OT[OpenTelemetry GenAI spans] --> AI[(App Insights)]
+```
+
+| Piece | Where | What it does |
+|---|---|---|
+| Tools | `src/dpa/agent/tools.py` | Four fixed, parameterised queries for common questions, plus `run_sql` as a guarded escape hatch. Errors go back to the model as data so it can correct itself. |
+| SQL guard | `src/dpa/agent/sql_guard.py` | Parses model SQL with sqlglot: one SELECT, allow-listed tables, no table functions, file paths or env access, forced LIMIT. The DuckDB connection also has external access off and its config locked, so a guard bypass still can't read files. |
+| Prompt registry | `prompts/`, `src/dpa/llmops/prompts.py` | One immutable YAML per version; `registry.yaml` picks the live one. Every trace and eval result carries `id@version#sha`. |
+| Tracing | `src/dpa/llmops/tracing.py` | OpenTelemetry spans using the GenAI semantic conventions (`invoke_agent`, `chat`, `execute_tool`) with tokens, cost, prompt version and guardrail outcomes. Exports to App Insights and/or JSONL. Question/answer text only with `DPA_TRACE_CONTENT=true`. |
+| Cost | `src/dpa/llmops/cost.py`, `config/model_prices.yaml` | Cost per answer from token usage (cached input priced separately). Unknown price = `n/a`, never 0. |
+| Guardrails | `src/dpa/llmops/guardrails.py` | Input injection block (spends no tokens); scrubbing of instruction-like text in tool results (indirect injection); number grounding with one self-correction round. |
+| Golden set | `evals/golden.yaml` | 38 questions: ranking, lookup, history, aggregates, shortages, not-found, out-of-scope, and red-team (direct, indirect via a poisoned FDA field, SQL write attempt). Numeric expectations are re-derived from the data in a test. |
+| Eval fixture | `evals/fixture/gold/` | Gold tables produced by running **the real pipeline** on a synthetic 26-drug, 70-week dataset (`scripts/build_eval_fixture.py`). |
+| Scoring | `src/dpa/evals/scoring.py` | Deterministic checks only (substrings, numbers at the answer's precision, refusal prefix, tools used). Metrics: accuracy, grounding, tool selection, refusal recall, false refusals, injection blocks, `run_sql` fallback, p50/p95 latency, tokens, cost. |
+| Record / replay | `src/dpa/agent/llm.py`, `evals/cassettes/` | A live run records every model response; CI replays them: free, deterministic, every push. Any change to prompt, tools or data changes the request hash, so CI says "re-record" instead of passing on stale answers. |
+| Gate | `evals/gate.yaml`, `src/dpa/evals/gate.py` | Absolute thresholds + no regression vs the committed baseline + safety-critical questions that must pass one by one. |
+| CI | `.github/workflows/ci.yml`, `eval-live.yml` | `ci`: unit tests + replayed eval + gate on every push. `eval-live`: real model, weekly and on prompt/agent PRs, uploads a fresh cassette. |
+| Monitoring | `ops/kql/` | KQL for cost/day, latency, grounding failures, guardrail hits, tool failures; a scheduled alert on ungrounded answers. |
+| Infra | `infra/main.bicep` | Log Analytics (daily cap), App Insights, Azure OpenAI with a pinned, capacity-capped deployment (`NoAutoUpgrade`, so evals stay valid), alert rule. |
+
+### Run it
+
+```bash
+pip install -e ".[agent]"                       # no Spark or Java needed for the agent
+pytest -q tests/test_agent_guards.py tests/test_agent_loop.py tests/test_evals.py
+
+dpa-eval run --mode replay                      # golden set from the cassette: free, offline
+dpa-eval gate evals/runs/<run>                  # PASS/FAIL vs thresholds and baseline
+
+# With Azure OpenAI (copy .env.example to .env and fill it in):
+dpa-ask "Which generic drug rose most in price over 90 days, and is it in shortage?"
+dpa-eval run --mode record --model gpt-4.1-mini # live run, records a new cassette
+dpa-eval run --mode record --prompt-version v2  # try a new prompt version...
+dpa-eval compare evals/runs/<v1> evals/runs/<v2> # ...and see what it fixed and broke
+dpa-eval promote evals/runs/<v2>                # make it the new baseline
+```
+
+### LLMOps decisions worth explaining
+
+- **Deterministic scoring before LLM judges.** Every gate metric is computed by code: the expected numbers,
+  the refusal prefix, the tools used. A judge model adds its own variance and cost; it's planned only for
+  free-text quality that code can't check, and only after calibrating it against hand labels.
+- **Numbers must come from tools.** The prompt forbids model arithmetic, and a code check enforces it: any
+  number in the answer that isn't in a tool result (at the answer's precision) triggers one correction
+  round, then a visible flag. Derived figures go through `run_sql`, so they are computed, not guessed.
+- **Two locks on SQL.** The AST guard gives the model a useful error to fix its query; the read-only,
+  no-external-access database is the backstop if the guard has a gap.
+- **Red-team cases live in the golden set.** Including an *indirect* injection planted in an FDA shortage
+  reason, because tool output is the realistic attack path for an agent that reads public data.
+  Safety questions are "critical": they must pass individually, so easy wins can't average them away.
+- **Record/replay makes evals a unit test.** Live model runs are slow and cost money, so they run weekly
+  and on prompt changes; every other push replays the recording for free.
+- **Pinned model, capped capacity.** `NoAutoUpgrade` stops Azure from swapping the model under a passing
+  baseline; a low TPM cap bounds the worst-case bill.
+- **Cost is a gated metric.** A prompt that answers 2 points better but costs 3x more fails the regression
+  rule unless the trade-off is accepted explicitly.
 
 ## What Phase 1 builds
 

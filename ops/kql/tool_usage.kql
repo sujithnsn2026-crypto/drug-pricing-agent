@@ -1,0 +1,7 @@
+// Tool calls, failure rate and run_sql fallback.
+dependencies
+| where name startswith "execute_tool "
+| extend tool = tostring(customDimensions["gen_ai.tool.name"]), ok = tobool(customDimensions["dpa.tool.ok"])
+| summarize calls = count(), failures = countif(ok == false), p95_ms = percentile(duration, 95) by tool
+| extend failure_pct = round(100.0 * failures / calls, 1)
+| order by calls desc

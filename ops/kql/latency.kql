@@ -1,0 +1,12 @@
+// End-to-end latency per question, and per model call.
+let agent = dependencies
+| where name == "invoke_agent dpa-ask" and tostring(customDimensions["dpa.status"]) != "blocked_input"
+| summarize p50_ms = percentile(duration, 50), p95_ms = percentile(duration, 95), n = count() by bin(timestamp, 1h)
+| extend span = "agent (end to end)";
+let llm = dependencies
+| where name startswith "chat "
+| summarize p50_ms = percentile(duration, 50), p95_ms = percentile(duration, 95), n = count() by bin(timestamp, 1h)
+| extend span = "model call";
+union agent, llm
+| order by timestamp desc
+| render timechart

@@ -1,0 +1,60 @@
+name: eval-live
+
+# Runs the golden set against the real Azure OpenAI deployment, records a fresh cassette,
+# and gates the result. Triggered by hand, weekly (to catch model drift on a fixed
+# deployment), and on PRs that change a prompt or the agent.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Azure OpenAI deployment name (default from evals/ci.yaml)
+        required: false
+      prompt_version:
+        description: Prompt version to evaluate (default the active one)
+        required: false
+  schedule:
+    - cron: "30 3 * * 1"  # Mondays 03:30 UTC (09:00 IST)
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "src/dpa/agent/**"
+      - "src/dpa/llmops/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    environment: azure-openai
+    env:
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[agent]"
+      - name: Live eval (records a new cassette)
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          [ -z "$MODEL" ] && MODEL=$(python -c "import yaml;print(yaml.safe_load(open('evals/ci.yaml'))['model'])")
+          ARGS=""
+          [ -n "${{ github.event.inputs.prompt_version }}" ] && ARGS="--prompt-version ${{ github.event.inputs.prompt_version }}"
+          dpa-eval run --mode record --model "$MODEL" $ARGS --out evals/runs/live --concurrency 4
+      - name: Gate
+        run: dpa-eval gate evals/runs/live
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-live
+          path: |
+            evals/runs/live
+            evals/cassettes
