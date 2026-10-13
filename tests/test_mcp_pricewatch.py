@@ -98,6 +98,12 @@ def test_detect_is_plain_sql_one_per_product(db):
     assert all(s["old_price"] >= 1.0 for s in cheap_cut) and len(cheap_cut) < len(sig)
 
 
+def test_parse_json_cleans_tool_names_and_prompt_defines_every_cause():
+    r = pricewatch.parse_json('ok {"evidence": [{"tool": "functions.get_drug_price", "finding": "x"}]}')
+    assert r["evidence"][0]["tool"] == "get_drug_price"
+    assert all(f"- {c}:" in pricewatch.INVESTIGATOR_SYSTEM for c in pricewatch.CAUSES)
+
+
 def _report(sig, **over):
     facts = {"old_price": sig["old_price"], "new_price": sig["new_price"], "pct_change": sig["pct_change"],
              "change_date": str(sig["change_date"])[:10], "in_shortage": sig["in_shortage"]}
