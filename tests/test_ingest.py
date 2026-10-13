@@ -67,3 +67,23 @@ def test_prune_snapshots_keeps_newest(tmp_path):
 def test_ndc_partition_urls():
     idx = {"results": {"drug": {"ndc": {"partitions": [{"file": "https://download.open.fda.gov/drug/ndc/a.zip"}]}}}}
     assert ingest.ndc_partition_urls(idx) == ["https://download.open.fda.gov/drug/ndc/a.zip"]
+
+
+def test_check_csv_header_rejects_gzip_and_html(tmp_path):
+    import gzip
+    import pytest
+
+    good = tmp_path / "good.csv"
+    good.write_text("NDC Description,NDC,NADAC Per Unit\nX,00002143380,1.0\n")
+    ingest.check_csv_header(str(good), required="NDC")  # no error
+
+    gz = tmp_path / "gz.csv"
+    gz.write_bytes(gzip.compress(b"NDC Description,NDC\n"))
+    with pytest.raises(ValueError, match="not a text CSV"):
+        ingest.check_csv_header(str(gz), required="NDC")
+    assert not gz.exists()  # bad file removed so the next run downloads again
+
+    html = tmp_path / "err.csv"
+    html.write_text("<html><body>Access denied</body></html>")
+    with pytest.raises(ValueError, match="no 'NDC' column"):
+        ingest.check_csv_header(str(html), required="NDC")

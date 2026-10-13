@@ -39,9 +39,26 @@ def test_ndc_added_midway(history):
     assert versions(history, "00378180110") == [(D(2025, 12, 26), None, True, Decimal("0.06120"))]
 
 
+def test_cms_correction_updates_in_place(history):
+    # week 2 repeats the original effective date with a new price: a correction, not a new version
+    assert versions(history, "00093310905") == [(D(2025, 11, 28), None, True, Decimal("0.11000"))]
+
+
+def test_relisting_never_starts_before_last_seen():
+    w = lambda i, eff, p: {"ndc11": "x", "week_idx": i, "as_of_date": D(2026, 1, 7) + dt.timedelta(weeks=i - 1),  # noqa: E731
+                           "effective_date": eff, "nadac_per_unit": p, "pricing_unit": "EA",
+                           "ndc_description": "d", "rate_setting_class": "G", "is_generic": True}
+    # seen in weeks 1-2, missing in week 3, back in week 4 with an OLD effective date
+    vs = gold.versions_for_ndc([w(1, D(2026, 1, 1), 1), w(2, D(2026, 1, 1), 1), w(4, D(2026, 1, 1), 1)], max_week=4)
+    assert [(v["valid_from"], v["valid_to"], v["is_current"]) for v in vs] == [
+        (D(2026, 1, 1), D(2026, 1, 14), False),
+        (D(2026, 1, 15), None, True),   # starts the day after it was last seen, not on Jan 1
+    ]
+
+
 def test_history_shape(history):
-    assert history.count() == 9
-    assert history.where("is_current").count() == 5
+    assert history.count() == 10
+    assert history.where("is_current").count() == 6
 
 
 def test_incremental_scd2_matches_full_rebuild(silver, history):
@@ -71,7 +88,7 @@ def test_price_changes_exclude_reappearance(history):
 def test_drug_price_current(history, silver):
     cur = {r.ndc11: r for r in gold.build_drug_price_current(
         history, silver["ndc_products"], silver["drug_shortages"]).collect()}
-    assert len(cur) == 5
+    assert len(cur) == 6
     a = cur["00093505801"]
     assert a.in_shortage is True and a.shortage_reason == "Demand increase for the drug"
     assert a.generic_name == "Atorvastatin Calcium" and a.current_price == Decimal("0.05890")
