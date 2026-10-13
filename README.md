@@ -40,23 +40,235 @@ flowchart LR
     style BRIEF stroke-dasharray: 5 5
 ```
 
-Dashed boxes are later phases. **Built so far: the data layer (Phase 1) and the Ask agent with its
-LLMOps layer (Phase 4a + 6).**
+**Built and run on real data:** the data layer, the Ask agent with its LLMOps layer, drug-label search,
+the MCP tool server and the Price-Watch workflow. See
+[How this was built and what the first real-data run showed](#how-this-was-built-and-what-the-first-real-data-run-showed).
 
 ## Roadmap
 
 | Phase | What | Status |
 |---|---|---|
 | 1 | Ingestion, Bronze/Silver/Gold, SCD2 price history, data-quality checks, CI, Azure workspace | ✅ done |
-| 1b | First run on real CMS/FDA data in Databricks; unpause the weekly schedule | next |
+| 1b | First run on real CMS/FDA data in Databricks | ✅ done (145 weekly NADAC files) |
 | 4a | Ask agent: Azure OpenAI tool calling over Gold with read-only tools and a parsed SQL guard | ✅ done |
 | 6 | **LLMOps:** golden eval set (38 questions incl. red-team), deterministic scoring, record/replay, eval-gated CI, prompt registry, OpenTelemetry → App Insights, cost per answer, injection + number-grounding guardrails, KQL monitoring, Bicep | ✅ done |
-| 2 | Drug labels in Azure AI Search: hybrid search, semantic rerank, citations | |
-| 3 | `dpa-mcp` server: the same read-only tools served over MCP (managed identity) | |
+| 2 | Drug labels in Azure AI Search: hybrid search, citations | ✅ done (102 labels, 1,390 chunks) |
+| 3 | `dpa-mcp` server: the same read-only tools served over MCP | ✅ done (stdio; managed identity next) |
 | 4b | Move the Ask agent onto Azure AI Foundry Agent Service using the MCP tools | |
-| 5 | Price-Watch multi-agent workflow (Microsoft Agent Framework): SQL signal finder, parallel investigators, verifier, human approval | |
+| 5 | Price-Watch workflow: SQL signal finder, parallel investigators, code verifier, human approval | ✅ done (first real run: 6/6 verified) |
 | 6b | Calibrated LLM judge for free-text quality, trajectory evals, online feedback loop | |
-| 7 | Terraform, FastAPI + review UI on Container Apps, write-up and demo video | |
+| 7 | Terraform, FastAPI + review UI on Container Apps, write-up and demo video | FastAPI UI runs locally; hosting next |
+
+## How this was built and what the first real-data run showed
+
+Everything below ran on Azure against real public data: CMS NADAC weekly files from 2024-01-03 to
+2026-10-07, the FDA NDC Directory, openFDA shortages and openFDA drug labels.
+
+**In one paragraph:** public price files go into Databricks and are cleaned into a price history. An AI agent answers questions about that history using only read-only tools, and every number it gives is checked against the data. A second team of agents looks for unusual price moves each week, explains them, and a person approves the findings. Tests run on every code change, including a replay of 38 test questions.
+
+### New to this? Words used below
+
+| Term | What it means in plain words |
+|---|---|
+| **Azure** | Microsoft's cloud: computers and services you rent by the hour or by use. |
+| **Resource group** (`rg-dpa`) | A folder in Azure that holds related services. Deleting the folder deletes everything in it. |
+| **Azure Cloud Shell** | A command line inside the Azure website, already signed in to your account. |
+| **CMS NADAC** | A weekly US government file of what pharmacies pay, on average, for each drug package. CMS is the agency that publishes it. |
+| **NDC** | National Drug Code: the number printed on every US drug package. CMS writes it as 11 digits, FDA as 10 digits with dashes. |
+| **Labeler** | The company whose name is on the package (for example Mylan or Wilshire). |
+| **Generic** | A drug sold under its chemical name (verapamil) instead of a brand name. Several labelers often sell the same generic. |
+| **FDA shortage list** | The US Food and Drug Administration's public list of drugs in short supply. |
+| **Drug label** | The official leaflet for a drug (dosage, warnings). openFDA publishes them as data. |
+| **Databricks** | A cloud service for processing large data with **Spark**, a tool that splits work across many computers. |
+| **Unity Catalog** | The place in Databricks where tables are registered and access is controlled. |
+| **Medallion (Bronze, Silver, Gold)** | Three stages of cleaning. Bronze is the raw files as tables; Silver is cleaned and typed; Gold is ready-to-use answers. |
+| **SCD2 price history** | Keeping every past price with the dates it applied, instead of overwriting the old price. |
+| **Data-quality (DQ) check** | An automatic test on the data, for example "every price is above zero". A failed check stops bad data going live. |
+| **Snapshot / DuckDB / Parquet** | The job exports Gold to files (Parquet) that a small database (DuckDB) reads, so the agents need no running cluster. |
+| **LLM** | Large language model, the AI that writes text. Here: **gpt-4.1-mini** on **Azure OpenAI**. |
+| **Agent** | An LLM that can call tools, read the results, and decide the next step until it can answer. |
+| **Tool** | A small function the agent is allowed to call, such as "get the price of this NDC". Every tool here only reads data. |
+| **MCP** (Model Context Protocol) | An open standard for offering tools to AI agents. `dpa-mcp` is this project's tool server. |
+| **SQL guard** | Code that checks the agent's database query before it runs: one read-only query, approved tables only, limited rows. |
+| **Azure AI Search** | Microsoft's search service. It holds the drug labels so the agent can look them up. |
+| **Chunk / embedding / hybrid search** | Labels are cut into short pieces (chunks). Each piece gets an embedding, a list of numbers that captures its meaning. Hybrid search matches both exact words and meaning. |
+| **Prompt / prompt version** | The written instructions given to the LLM. Each change is saved as a new version (v1, v2, v3) so results can be compared. |
+| **Golden set / eval** | 38 test questions with known correct answers. An eval runs the agent on all of them and scores it. |
+| **Grounded number** | A number in the answer that appears in a tool result, so the AI did not make it up or calculate it in its head. |
+| **Prompt injection / red-team** | An attempt to trick the AI with hidden instructions. Red-team questions are deliberate attacks used as tests. |
+| **Cassette (record and replay)** | A recording of the AI's real answers. Tests replay the recording instead of calling the AI again, so they are free and give the same result every time. |
+| **Eval gate / threshold / baseline** | The pass marks a change must meet (thresholds, for example accuracy at least 85%) and the last approved results it must not fall below (baseline). |
+| **Token / cost per answer** | AI usage is billed per token (a piece of a word). Cost per answer is the bill for one question: $0.00094 here. |
+| **p95 latency** | 95% of answers arrive faster than this time. |
+| **OpenTelemetry / App Insights** | A standard way to record what each step did and how long it took; App Insights is where Azure stores and shows those records. |
+| **Git / commit / push** | Git tracks every change to the code. A commit saves a change; a push sends it to GitHub. |
+| **CI / GitHub Actions / run** | Continuous integration: on every push, GitHub Actions starts a run that installs the code and runs every test. Green means all passed. |
+| **Price-Watch signal / investigator / verifier** | A signal is an unusual price move found by SQL. An investigator is an agent that explains one signal. The verifier is code that re-checks the explanation against the data. |
+| **Peer NDCs** | Other packages of the same generic drug from other labelers. If they moved too, the change is market-wide. |
+
+### Step 1. Build the medallion pipeline on Azure Databricks
+
+The job is a Databricks Asset Bundle with four tasks: bronze, silver, gold, export. Ingestion runs
+outside Databricks and lands files in a Unity Catalog volume; the job turns them into tables.
+
+![Databricks job run: gold and export tasks succeeded on serverless](docs/screenshots/01-databricks-job-run.png)
+
+**What to look for:** the four boxes (bronze, silver, gold, export) are the job's tasks. Green ticks on gold and export, Status *Succeeded*, Duration *5m 38s*, Compute *Serverless*. Bronze and silver show *Disabled*: this run rebuilt only gold and export from the Silver tables already in place.
+
+Gold has four tables in Unity Catalog: the SCD2 price history, every price change, the current price
+per NDC, and the data-quality results.
+
+![Unity Catalog: the gold schema with its four tables](docs/screenshots/02-unity-catalog-gold.png)
+
+**What to look for:** on the left, the catalog `dbw_dpa` with its schemas (bronze, silver, gold, landing). The gold schema holds 4 tables, listed on the right with their creation times.
+
+### Step 2. Run it on real data, and fix what real data broke
+
+The synthetic data passed every test. Real CMS data found five problems the tests had not:
+
+- CMS sometimes serves files with `Content-Encoding: gzip`, so the `.csv` on disk was gzip bytes.
+  Ingestion now decodes the stream.
+- CMS **corrects** prices and **re-lists** NDCs. Both needed explicit SCD2 rules, with tests.
+- Some CMS rows carry **future effective dates** (seen on NDC 00009766701). A drop-out could end a
+  version before it started. Fixed: a drop-out never closes a version before its start date.
+- Gold now follows **write → audit → publish**, so a failed data-quality check never leaves a bad
+  price history live.
+- An export-only job task started no Spark session and **silently wrote nothing**. Fixed and tested.
+
+Result: **145 weekly NADAC files → 4,314,524 Silver rows → Gold: 961,568 history rows, 922,487 price
+changes, 30,048 active NDCs, 380 in FDA shortage.** The job exports a Gold snapshot (Parquet → DuckDB)
+that the agents read.
+
+![Gold snapshot from real data, with the top generic 90-day increases](docs/screenshots/02b-gold-snapshot-real-data.png)
+
+**What to look for:** the four row counts at the top match the numbers above. In the table, *90d ago* and *now* are the price per unit 90 days ago and today; *change* is the percentage; *shortage False* means the FDA does not list it as short.
+
+The first thing the real data showed: the biggest 90-day generic increases were **verapamil** capsules
+from several labelers at once (+112% to +176%), with no FDA shortage listed.
+
+### Step 3. Index drug labels in Azure AI Search
+
+openFDA drug labels are chunked by section, embedded with `text-embedding-3-small`, and loaded into a
+hybrid (keyword + vector) index. **102 labels became 1,390 chunks.** Every hit carries a citation back
+to the label on DailyMed. Label text is treated as untrusted input.
+
+![Azure AI Search: the drug-labels index with 1,390 documents](docs/screenshots/09-ai-search-label-index.png)
+
+**What to look for:** the index `drug-labels` with *Document count 1,390* (one document per chunk) in the search service `srch-dpa-sujith`.
+
+### Step 4. Serve one tool layer over MCP
+
+`dpa-mcp` serves the same six read-only tools the Ask agent uses, so the Ask agent, Price-Watch and any
+MCP client share one tested data access path. Below, a live round trip on the real snapshot: `run_sql`
+counts 30,048 active NDCs and 380 in shortage, and `search_labels` returns cited label text.
+
+![dpa-mcp listing its six read-only tools and two live tool calls](docs/screenshots/03-mcp-server-tools.png)
+
+**What to look for:** six lines starting with `tool`, each `read_only=True`, with the inputs each tool takes. Below them, two real calls and their answers: `run_sql` returns 30,048 NDCs and 380 in shortage; `search_labels` returns a verapamil label passage with its DailyMed link.
+
+### Step 5. Ask agent: measure, change the prompt, measure again
+
+The golden set (38 questions, including red-team cases) ran live against `gpt-4.1-mini` and recorded a
+cassette for every prompt version:
+
+| Prompt | Accuracy | What changed |
+|---|---|---|
+| v1 | 94.7% | Baseline. Missed `oos-04` (a shopping question it should refuse) and `red-06`. |
+| v2 | | Shopping questions out of scope; `ILIKE` for text in `run_sql`. Fixed both, but broke `oos-02`. |
+| v3 | **100%** | Mandatory `Out of scope:` prefix; copy drug names exactly. Fixed the regression. |
+
+v3 costs **$0.00094 per answer** (+8% vs v1) with 100% of numbers grounded in tool results, and was
+promoted to the baseline. `dpa-eval compare` shows exactly what each version fixed and broke:
+
+![dpa-eval compare v1 vs v3, then the gate passing on v3](docs/screenshots/04-eval-compare-and-gate.png)
+
+**What to look for:** column A is prompt v1, column B is v3. *Answer accuracy* 94.7% → 100%, *Out-of-scope refused* 85.7% → 100%, *Cost per question* $0.00087 → $0.00094. *Fixed in B: oos-04, red-06* and *Broken in B: none*. Below, the gate lines all show a green tick.
+
+The same agent behind a small FastAPI page, with the tool trace, model calls, latency and cost on every
+answer:
+
+![Ask agent web page answering the 90-day increase question with its trace](docs/screenshots/06-ask-agent-web.png)
+
+**What to look for:** the question, the answer, and under it *1 tool calls · 2 model calls · 2411 ms · cost $0.00174 · answered*. The *Agent trace* table shows the one tool the agent called and the exact inputs it used.
+
+### Step 6. Price-Watch: detect in SQL, explain with agents, verify in code
+
+SQL finds the signals; one investigator agent per signal finds the likely cause using the MCP tools; code
+checks every number and the cause against the data; a person approves before the brief goes out.
+
+The first real run (28-day window, ≥20% moves, items under $0.05 excluded so sub-cent noise can't
+dominate percentages): **6 signals, 6/6 verified by code, $0.0146 for the whole run.**
+
+![Price-Watch run: six signals with peers moved, likely cause and verification](docs/screenshots/05-pricewatch-run.png)
+
+**What to look for:** the second line: *6 signals (SQL) · 6 verified by code · cost $0.0146*. In the table, *peers moved* is how many other labelers of the same generic moved; when it is 0 the cause is `labeler_price_action`, when it is 2 or 3 the cause is `market_wide_move`. *verified yes* means code confirmed the numbers.
+
+Two bugs surfaced on real data and were fixed:
+
+1. **Missing cause.** The cause list had no category for "one labeler raised its own price", so the
+   model filed every such move as `supplier_exit`. Added `labeler_price_action`, with a definition for
+   every cause in the investigator prompt.
+2. **Peer-blind investigators.** Each investigator saw only its own NDC, so every verapamil signal was
+   called a single-labeler action, although Wilshire, Mylan and Mylan Institutional all moved
+   112–176% in the same window. Detection now returns `peer_ndcs_moved`; a new cause,
+   `market_wide_move`, covers it; and the **verifier rejects `labeler_price_action` when peers moved**,
+   giving the model one retry with the peer list. In the run above, verapamil is now
+   `market_wide_move` (3 peers moved) while Dilantin, with 0 peers moved, stays `labeler_price_action`.
+
+Every finding waits for review, with the evidence from each tool call:
+
+![Price-Watch review page: verified findings with Approve and Reject](docs/screenshots/07-pricewatch-review.png)
+
+**What to look for:** each finding shows a *verified against data* badge, its cause and confidence, a short explanation, one line of evidence per tool call, and the **Approve** and **Reject** buttons a person uses.
+
+**5 were approved and 1 rejected**, and only the approved findings reach the brief:
+
+![Price-Watch brief for NADAC as of 2026-10-07: 5 approved of 6 signals](docs/screenshots/08-pricewatch-brief.png)
+
+**What to look for:** *5 approved of 6 signals · model gpt-4.1-mini · cost $0.0146*. Each item gives the drug, the move, the likely cause, confidence, NDC, and the evidence behind it.
+
+### Step 7. What it ran on
+
+One resource group, `rg-dpa`: the Databricks workspace (Central India), Azure AI Foundry with three
+pinned deployments (East US 2), and the AI Search service. `gpt-4.1-mini` is pinned to `2025-04-14`
+with a 30K tokens/min cap, so evals stay valid and the worst-case bill is bounded.
+
+![rg-dpa resources and the model deployments](docs/screenshots/10-azure-resources.png)
+
+**What to look for:** the first table lists the three model deployments (chat, embed, gpt-4.1-mini) with version and capacity. The second lists the three services inside `rg-dpa` and their regions.
+
+### Step 8. Gate every push in CI
+
+The code lives on GitHub. Every push runs two jobs: the Spark pipeline tests, and the agent tests plus
+the **replayed eval gate**, which re-runs the 38 questions from the recorded cassette for free.
+
+![The GitHub repository](docs/screenshots/11-github-repo.png)
+
+**What to look for:** the green tick next to the latest commit (all tests passed), the project folders, and the description and topics on the right.
+
+![GitHub Actions run history](docs/screenshots/12-actions-runs.png)
+
+**What to look for:** run **#44** has a red cross (failed) and run **#45** right above it has a green tick (passed). Every other run is green.
+
+Run #44 was the first with a committed cassette, so the first time the gate could run. It failed, but
+not at the gate: a unit test still expected prompt `v1` after `v3` was promoted. The test now checks
+whichever version `prompts/registry.yaml` marks active (still pinned by id, version and content hash).
+No threshold was loosened. Run #45 replayed the v3 cassette with no misses and passed every check:
+
+![CI run #45: both jobs green and the eval gate passing every threshold](docs/screenshots/13-ci-run-detail.png)
+
+**What to look for:** *Status Success*, both jobs green, and under *Eval gate: PASSED* a green tick on every check: the thresholds, the 7 critical questions, and the 4 comparisons with the baseline.
+
+### Results at a glance
+
+| Area | Result |
+|---|---|
+| Data | 145 weekly NADAC files · 4,314,524 Silver rows |
+| Gold | 961,568 history rows · 922,487 price changes · 30,048 NDCs · 380 in shortage |
+| Label search | 102 labels · 1,390 chunks · cited hits |
+| Ask agent | 94.7% (v1) → **100%** (v3) accuracy · 100% numbers grounded · **$0.00094 per answer** |
+| Price-Watch | 6 signals · **6/6 verified by code** · **$0.0146 per run** · 5 approved, 1 rejected |
+| CI | Replayed eval gate on every push: all thresholds, 7 critical questions, no regression vs baseline |
 
 ### Design principle for the agents
 
@@ -117,7 +329,7 @@ dpa-eval compare evals/runs/<v1> evals/runs/<v2> # ...and see what it fixed and 
 dpa-eval promote evals/runs/<v2>                # make it the new baseline
 ```
 
-### Deploy the LLMOps infrastructure (not yet deployed)
+### Deploy the LLMOps infrastructure
 
 1. **Pick a model your region offers.** Azure portal → Azure AI Foundry → Model catalog. Note the model name,
    version and deployment type (e.g. `gpt-4.1-mini`, `2025-04-14`, Global Standard). Set its price in
