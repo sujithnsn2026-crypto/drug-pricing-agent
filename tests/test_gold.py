@@ -145,3 +145,17 @@ def test_failed_audit_never_publishes(spark, silver, tmp_path, monkeypatch):
         pipeline.step_gold(store, full_refresh=True)
     after = sorted(tuple(r) for r in store.read("gold", "nadac_price_history").collect())
     assert after == before
+
+
+def test_export_step_runs_on_its_own(spark, landing, tmp_path):
+    """A job task that runs only `--step export` must write the snapshot (it once silently did nothing)."""
+    import os
+
+    from dpa import pipeline
+
+    out = str(tmp_path / "local")
+    pipeline.main(["--local", "--local-dir", out, "--landing-dir", landing, "--step", "transform"])
+    exp = str(tmp_path / "exp")
+    pipeline.main(["--local", "--local-dir", out, "--landing-dir", landing, "--step", "export", "--export-dir", exp])
+    assert sorted(os.listdir(exp)) == ["drug_price_current", "fact_price_change", "nadac_price_history"]
+    assert spark.read.parquet(os.path.join(exp, "drug_price_current")).count() == 6
