@@ -62,14 +62,17 @@ def test_tool_call_then_grounded_answer(db, spans):
     assert r.ungrounded_numbers == [] and r.grounding_checked >= 1
     assert r.usage.input_tokens == 2500 and r.usage.output_tokens == 80
     assert r.cost_usd == pytest.approx((2500 * 1.0 + 80 * 4.0) / 1e6)
-    # System prompt carries the data date and is the versioned one.
-    assert "2026-01-14" in llm.calls[0][0]["content"] and r.prompt_ref.startswith("ask_agent@v1#")
+    # System prompt carries the data date and is the versioned one: whichever version
+    # prompts/registry.yaml marks active, pinned by id, version and content hash.
+    assert "2026-01-14" in llm.calls[0][0]["content"]
+    assert r.prompt_ref == load_prompt("ask_agent").ref
 
     names = [s.name for s in exporter.get_finished_spans()]
     assert names.count("chat test-model") == 2 and "execute_tool top_price_changes" in names
     root = next(s for s in exporter.get_finished_spans() if s.name == "invoke_agent dpa-ask")
     assert root.attributes["gen_ai.usage.input_tokens"] == 2500
-    assert root.attributes["dpa.prompt.version"] == "v1" and root.attributes["dpa.status"] == "answered"
+    assert root.attributes["dpa.prompt.version"] == load_prompt("ask_agent").version
+    assert root.attributes["dpa.status"] == "answered"
     assert "dpa.question" not in root.attributes  # content capture is off by default
 
 
