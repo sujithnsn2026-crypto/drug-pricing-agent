@@ -110,3 +110,22 @@ def test_quality_catches_bad_rows(spark, silver):
     res = quality.run_checks(spark, {"silver.nadac_prices": bad})
     with pytest.raises(RuntimeError, match="price_positive"):
         quality.assert_no_errors(res)
+
+
+def test_failed_audit_never_publishes(spark, silver, tmp_path, monkeypatch):
+    """Write -> audit -> publish: if the candidate history fails DQ, the live table is untouched."""
+    from dpa import pipeline
+    from dpa.store import LocalStore
+
+    store = LocalStore(spark, str(tmp_path))
+    for name, df in silver.items():
+        store.overwrite(df, "silver", name)
+    pipeline.step_gold(store, full_refresh=True)
+    before = sorted(tuple(r) for r in store.read("gold", "nadac_price_history").collect())
+
+    bad = gold.build_price_history(silver["nadac_prices"]).withColumn("valid_to", F.lit(D(1999, 1, 1)))
+    monkeypatch.setattr(gold, "build_price_history", lambda _df: bad)
+    with pytest.raises(RuntimeError, match="valid_range"):
+        pipeline.step_gold(store, full_refresh=True)
+    after = sorted(tuple(r) for r in store.read("gold", "nadac_price_history").collect())
+    assert after == before
