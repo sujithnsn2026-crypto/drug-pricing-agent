@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  pipeline:
+    name: data pipeline (Spark)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,5 +18,40 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev,agents]"
-      - run: pytest -q
+      - run: pip install -e ".[dev]"
+      - run: pytest -q tests/test_ndc.py tests/test_ingest.py tests/test_bronze_silver.py tests/test_gold.py
+
+  agent:
+    name: agent + offline eval gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[agent]" pytest
+      - name: Unit tests (guardrails, tools, agent loop, eval scoring, gate, MCP server, Price-Watch)
+        run: pytest -q tests/test_agent_guards.py tests/test_agent_loop.py tests/test_evals.py tests/test_mcp_pricewatch.py
+      - name: Replay the golden set from the recorded cassette and gate it
+        # Free and deterministic: no model calls. If a prompt, tool or the fixture changed,
+        # the cassette misses and this fails with "re-record", which is what you want.
+        run: |
+          MODEL=$(python -c "import yaml;print(yaml.safe_load(open('evals/ci.yaml'))['model'])")
+          VERSION=$(python -c "import yaml;print(yaml.safe_load(open('prompts/registry.yaml'))['active']['ask_agent'])")
+          CASSETTE="evals/cassettes/${MODEL}__ask_agent-${VERSION}.jsonl"
+          if [ ! -f "$CASSETTE" ]; then
+            # Before the first live run there is nothing to replay. Once a cassette is committed,
+            # a missing or stale one fails this step.
+            echo "::warning::No cassette for ${MODEL} / ask_agent ${VERSION} yet. Run 'eval-live' once and commit evals/cassettes/."
+            echo "No eval cassette recorded yet: replay gate skipped." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          dpa-eval run --mode replay --model "$MODEL" --out evals/runs/ci
+          dpa-eval gate evals/runs/ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-replay
+          path: evals/runs/ci
+          if-no-files-found: ignore
