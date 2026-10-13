@@ -5,6 +5,7 @@ It covers the tricky cases on purpose:
 - an NDC that drops out of NADAC and comes back
 - an NDC that is added part-way through
 - two NADAC years whose CSV headers are in a different column order
+- a CMS price correction that keeps the original effective date
 - an openFDA shortage that matches a NADAC NDC (hyphenated 4-4-2 vs 11-digit)
 
 NDCs and prices are made up. Run:  python scripts/make_sample_data.py sample_data/landing
@@ -32,7 +33,11 @@ DRUGS = {
                     {4: "0.06120"}, range(4, 8)),                        # new from week 4
     "59417011601": ("LISDEXAMFETAMINE 30 MG TAB CHEW", "B", "EA",
                     {0: "11.20450", 6: "12.98100"}, range(8)),
+    "00093310905": ("AMOXICILLIN 500 MG CAPSULE", "G", "EA",
+                    {0: "0.10000", 2: "0.11000"}, range(8)),                 # week 2: CMS correction
 }
+# NDCs whose later price keeps the ORIGINAL effective date (a CMS correction, not a new price)
+CORRECTIONS = {"00093310905"}
 
 HEADER_2025 = ["NDC Description", "NDC", "NADAC Per Unit", "Effective Date", "Pricing Unit",
                "Pharmacy Type Indicator", "OTC", "Explanation Code", "Classification for Rate Setting",
@@ -61,6 +66,8 @@ def nadac_rows(year: int):
             eff = WEEKS[start] - dt.timedelta(days=5)
             if ndc == "68180051301" and wi >= 5:  # re-listed after the gap
                 eff = WEEKS[5] - dt.timedelta(days=5)
+            if ndc in CORRECTIONS:
+                eff = WEEKS[0] - dt.timedelta(days=5)
             yield {
                 "NDC Description": desc, "NDC": ndc, "NADAC Per Unit": price,
                 "Effective Date": eff.strftime("%m/%d/%Y"), "Pricing Unit": unit,
