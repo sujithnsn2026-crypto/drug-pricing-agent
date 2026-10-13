@@ -58,24 +58,39 @@ def step_silver(store: Store) -> None:
     quality.assert_no_errors(results)
 
 
-def step_gold(store: Store, full_refresh: bool = False) -> None:
-    nadac = store.read("silver", "nadac_prices")
+def _audit(store: Store, df, table: str) -> None:
+    """Data-quality checks on a candidate table; raises before anything is published."""
+    results = quality.run_checks(store.spark, {f"gold.{table}": df})
+    store.append(results, "gold", "dq_results")
+    quality.assert_no_errors(results)
 
-    if full_refresh or not store.exists("gold", "nadac_price_history"):
+
+def step_gold(store: Store, full_refresh: bool = False) -> None:
+    """Write -> audit -> publish: price history is checked BEFORE it replaces the live table,
+    so a failed check never leaves a bad table behind for the next run or the agents."""
+    nadac = store.read("silver", "nadac_prices")
+    live, staging = "nadac_price_history", "nadac_price_history__staging"
+
+    if full_refresh or not store.exists("gold", live):
         log.info("Building price history from scratch (full refresh)")
-        store.overwrite(gold.build_price_history(nadac), "gold", "nadac_price_history")
+        store.overwrite(gold.build_price_history(nadac), "gold", staging)          # write
+        candidate = store.read("gold", staging)
+        _audit(store, candidate, live)                                             # audit
+        store.overwrite(candidate, "gold", live)                                   # publish
+        store.drop("gold", staging)
     else:
-        weeks = gold.new_weeks(nadac, store.read("gold", "nadac_price_history"))
+        weeks = gold.new_weeks(nadac, store.read("gold", live))
         log.info("Incremental SCD2: %s new weekly file(s) %s", len(weeks), weeks)
         for week in weeks:
-            history = store.read("gold", "nadac_price_history")
+            history = store.read("gold", live)
             staged = gold.scd2_staged_updates(history, nadac.where(nadac.as_of_date == week))
+            _audit(store, gold.apply_staged_local(history, staged), live)          # audit the merge result
             if store.is_delta:
-                gold.merge_staged_delta(store.spark, store.name("gold", "nadac_price_history"), staged)
+                gold.merge_staged_delta(store.spark, store.name("gold", live), staged)
             else:
-                store.overwrite(gold.apply_staged_local(history, staged), "gold", "nadac_price_history")
+                store.overwrite(gold.apply_staged_local(history, staged), "gold", live)
 
-    history = store.read("gold", "nadac_price_history")
+    history = store.read("gold", live)
     store.overwrite(gold.build_price_changes(history), "gold", "fact_price_change")
     store.overwrite(
         gold.build_drug_price_current(
@@ -85,10 +100,6 @@ def step_gold(store: Store, full_refresh: bool = False) -> None:
         "drug_price_current",
     )
     log.info("gold tables written")
-
-    results = quality.run_checks(store.spark, {"gold.nadac_price_history": history})
-    store.append(results, "gold", "dq_results")
-    quality.assert_no_errors(results)
 
 
 def step_export(store: Store, export_dir: str) -> None:

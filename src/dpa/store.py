@@ -33,6 +33,9 @@ class Store(ABC):
     @abstractmethod
     def exists(self, layer: str, table: str) -> bool: ...
 
+    @abstractmethod
+    def drop(self, layer: str, table: str) -> None: ...
+
     @property
     @abstractmethod
     def is_delta(self) -> bool: ...
@@ -68,6 +71,9 @@ class DeltaStore(Store):
     def exists(self, layer, table):
         return self.spark.catalog.tableExists(self.name(layer, table))
 
+    def drop(self, layer, table):
+        self.spark.sql(f"DROP TABLE IF EXISTS {self.name(layer, table)}")
+
     @property
     def is_delta(self):
         return True
@@ -96,6 +102,9 @@ class LocalStore(Store):
 
     def exists(self, layer, table):
         return os.path.isdir(self.path(layer, table))
+
+    def drop(self, layer, table):
+        shutil.rmtree(self.path(layer, table), ignore_errors=True)
 
     @property
     def is_delta(self):
