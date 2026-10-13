@@ -455,7 +455,10 @@ dpa-eval compare evals/runs/<v1> evals/runs/<v2> # ...and see what it fixed and 
 dpa-eval promote evals/runs/<v2>                # make it the new baseline
 ```
 
-### Deploy the LLMOps infrastructure
+### Deploy the LLMOps infrastructure (not used in the first run)
+
+The first real-data run created its Azure services by hand (Step 9 shows them); Application Insights and Log
+Analytics were not part of `rg-dpa`, so traces could only be written to the local JSONL files. These steps deploy the full monitoring layer.
 
 1. **Pick a model your region offers.** Azure portal → Azure AI Foundry → Model catalog. Note the model name,
    version and deployment type (e.g. `gpt-4.1-mini`, `2025-04-14`, Global Standard). Set its price in
