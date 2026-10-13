@@ -4,29 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drug-pricing-agent"
-version = "0.1.0"
-description = "Drug Pricing Intelligence Agent on Azure: Databricks medallion pipeline + Foundry agent over public US drug pricing data"
+version = "0.3.0"
+description = "Drug Pricing Intelligence Agent on Azure: Databricks medallion pipeline, Ask agent with LLMOps, MCP tool server and Price-Watch multi-agent workflow over public US drug pricing data"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
 ]
 
+[project.scripts]
+dpa-ask = "dpa.cli:ask_main"
+dpa-eval = "dpa.cli:eval_main"
+dpa-mcp = "dpa.ai.mcp_server:main"
+dpa-pricewatch = "dpa.ai.pricewatch:main"
+dpa-labels = "dpa.ai.labels:main"
+
 [project.optional-dependencies]
-dev = [
-    "pyspark>=3.5,<4.1",
-    "pandas>=2.0",
-    "pyarrow>=14",
-    "pytest>=8",
-    "duckdb>=1.0",
-    "fastapi>=0.110",
-]
-agents = [
-    "mcp>=2.3,<3",
+# The agent + LLMOps layer. Runs without Spark: the agent reads Gold tables with DuckDB.
+agent = [
+    "duckdb>=1.1",
+    "sqlglot>=25",
     "openai>=1.60",
     "azure-identity>=1.17",
-    "sqlglot>=25",
+    "opentelemetry-sdk>=1.27",
+    "azure-monitor-opentelemetry-exporter>=1.0.0b30",
+    "pyyaml>=6",
+    # Phases 2-5: MCP server, Price-Watch, label search, web app
+    "mcp>=2.3,<3",
     "fastapi>=0.110",
     "uvicorn>=0.30",
+]
+dev = [
+    "pyspark>=3.5,<4.1",
+    "pandas>=2.0",   # grouped-map SCD2 build (applyInPandas)
+    "pyarrow>=14",
+    "pytest>=8",
 ]
 
 [tool.setuptools.packages.find]

@@ -37,17 +37,11 @@ resources:
             dependencies:
               - requests>=2.31
 
+      # Ingestion runs OUTSIDE Databricks: data.medicaid.gov answers 403 to Databricks serverless
+      # egress, while it works from Azure Cloud Shell or a GitHub Actions runner. The runner lands
+      # files in the Unity Catalog volume (see README "Weekly run"), then this job transforms them.
       tasks:
-        - task_key: ingest
-          environment_key: default
-          max_retries: 2
-          min_retry_interval_millis: 300000
-          spark_python_task:
-            python_file: ./jobs/run.py
-            parameters: ["--step", "ingest", "--catalog", "${var.catalog}"]
-
         - task_key: bronze
-          depends_on: [{ task_key: ingest }]
           environment_key: default
           spark_python_task:
             python_file: ./jobs/run.py
@@ -66,3 +60,10 @@ resources:
           spark_python_task:
             python_file: ./jobs/run.py
             parameters: ["--step", "gold", "--catalog", "${var.catalog}"]
+
+        - task_key: export
+          depends_on: [{ task_key: gold }]
+          environment_key: default
+          spark_python_task:
+            python_file: ./jobs/run.py
+            parameters: ["--step", "export", "--catalog", "${var.catalog}"]
