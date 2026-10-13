@@ -94,6 +94,8 @@ def test_detect_is_plain_sql_one_per_product(db):
     assert sig[0]["ndc11"] == "70010000101" and sig[0]["pct_change"] == pytest.approx(85.02)
     assert all(abs(s["pct_change"]) >= 20 for s in sig)
     assert len({s["ndc_description"] for s in sig}) == len(sig)
+    cheap_cut = pricewatch.detect(db, days=120, threshold=20, top=10, min_price=1.0)
+    assert all(s["old_price"] >= 1.0 for s in cheap_cut) and len(cheap_cut) < len(sig)
 
 
 def _report(sig, **over):
