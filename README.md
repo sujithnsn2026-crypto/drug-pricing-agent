@@ -349,6 +349,14 @@ that listed the NDC, which is how drop-outs are handled.
 `silver.ndc_products`, `silver.drug_shortages`, `gold.nadac_price_history` and the weekly job. *Downstream*
 (outputs): the `landing.raw` volume, where the export step writes the snapshot.
 
+![SQL row counts straight from the tables](docs/screenshots/31-sql-row-counts.png)
+
+**What to look for:** one read-only SQL query, run in the Databricks SQL Editor on the Serverless Starter Warehouse,
+counts each table directly: **145** weekly releases and **4,314,524** rows in Silver, **961,568** history rows and
+**922,487** price changes in Gold, and **380** NDCs in shortage. These are the same numbers quoted throughout this
+README, now proven from the tables themselves. (The sixth row, 30,048 current NDCs, is just below the visible area;
+screenshots 02b and 03 show it.)
+
 #### 9.3 Azure AI Foundry: the AI models
 
 ![The Foundry resource in the Azure portal](docs/screenshots/26-foundry-resource-azure.png)
