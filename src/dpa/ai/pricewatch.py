@@ -46,6 +46,7 @@ moves AS (
   WHERE CAST(c.change_date AS DATE) > CAST(ref.d AS DATE) - INTERVAL {days} DAY
     AND abs(c.pct_change) >= {threshold}
     AND c.old_price > 0
+    AND c.old_price >= {min_price}
 )
 SELECT ndc11, ndc_description, change_date, old_price, new_price, pct_change, pricing_unit,
        is_generic, generic_name, labeler_name, in_shortage
@@ -91,8 +92,11 @@ class Finding:
 # --------------------------------------------------------------------------- #
 # Detect (code)
 # --------------------------------------------------------------------------- #
-def detect(db: DuckDbGold, days: int = 28, threshold: float = 20.0, top: int = 6) -> list[dict]:
-    return db.query(DETECT_SQL.format(days=int(days), threshold=float(threshold), top=int(top)))
+def detect(db: DuckDbGold, days: int = 28, threshold: float = 20.0, top: int = 6,
+           min_price: float = 0.0) -> list[dict]:
+    """min_price drops sub-cent items, where tiny absolute moves look like huge % moves."""
+    return db.query(DETECT_SQL.format(days=int(days), threshold=float(threshold), top=int(top),
+                                      min_price=float(min_price)))
 
 
 # --------------------------------------------------------------------------- #
@@ -186,9 +190,9 @@ async def investigate_all(signals: list[dict], llm: LLMClient, model: str, sessi
 
 
 async def run(days: int, threshold: float, top: int, out_root: str, gold_dir: str, model: str,
-              llm: LLMClient | None = None, env: dict | None = None) -> str:
+              llm: LLMClient | None = None, env: dict | None = None, min_price: float = 0.0) -> str:
     db = DuckDbGold(gold_dir)
-    signals = detect(db, days, threshold, top)
+    signals = detect(db, days, threshold, top, min_price)
     if llm is None:
         from dpa.agent.llm import AzureOpenAIClient
 
@@ -202,6 +206,7 @@ async def run(days: int, threshold: float, top: int, out_root: str, gold_dir: st
     run_dir = os.path.join(out_root, started.strftime("%Y-%m-%dT%H%M%SZ"))
     os.makedirs(run_dir, exist_ok=True)
     meta = {"started": started.isoformat(), "as_of_date": db.as_of_date(), "days": days, "threshold": threshold,
+            "min_price": min_price,
             "signals": len(signals), "verified": sum(f.verified for f in findings), "model": model,
             "model_calls": calls, "usage": asdict(usage), "cost_usd": None if cost is None else round(cost, 4)}
     _save(run_dir, meta, findings)
@@ -284,6 +289,7 @@ def main() -> None:
     r.add_argument("--days", type=int, default=28)
     r.add_argument("--threshold", type=float, default=20.0)
     r.add_argument("--top", type=int, default=6)
+    r.add_argument("--min-price", type=float, default=0.05, help="ignore items that cost less than this per unit")
     r.add_argument("--out", default="pricewatch_runs")
     r.add_argument("--gold-dir", default=os.environ.get("DPA_GOLD_DIR", DEFAULT_FIXTURE))
     r.add_argument("--model", default=DEFAULT_MODEL, help="Azure OpenAI deployment name")
@@ -301,7 +307,7 @@ def main() -> None:
         os.makedirs(a.out, exist_ok=True)
         setup_tracing(jsonl_path=os.path.join(a.out, "traces.jsonl"))
         try:
-            run_dir = asyncio.run(run(a.days, a.threshold, a.top, a.out, a.gold_dir, a.model))
+            run_dir = asyncio.run(run(a.days, a.threshold, a.top, a.out, a.gold_dir, a.model, min_price=a.min_price))
         finally:
             shutdown_tracing()
         meta, findings = _load(run_dir)
