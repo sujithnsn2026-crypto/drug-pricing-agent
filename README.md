@@ -49,7 +49,7 @@ the MCP tool server and the Price-Watch workflow. See
 | Phase | What | Status |
 |---|---|---|
 | 1 | Ingestion, Bronze/Silver/Gold, SCD2 price history, data-quality checks, CI, Azure workspace | ✅ done |
-| 1b | First run on real CMS/FDA data in Databricks | ✅ done (145 weekly NADAC files) |
+| 1b | First run on real CMS/FDA data in Databricks | ✅ done (145 weekly NADAC releases) |
 | 4a | Ask agent: Azure OpenAI tool calling over Gold with read-only tools and a parsed SQL guard | ✅ done |
 | 6 | **LLMOps:** golden eval set (38 questions incl. red-team), deterministic scoring, record/replay, eval-gated CI, prompt registry, OpenTelemetry → App Insights, cost per answer, injection + number-grounding guardrails, KQL monitoring, Bicep | ✅ done |
 | 2 | Drug labels in Azure AI Search: hybrid search, citations | ✅ done (102 labels, 1,390 chunks) |
@@ -61,7 +61,7 @@ the MCP tool server and the Price-Watch workflow. See
 
 ## How this was built and what the first real-data run showed
 
-Everything below ran on Azure against real public data: CMS NADAC weekly files from 2024-01-03 to
+Everything below ran on Azure against real public data: CMS NADAC weekly releases from 2024-01-03 to
 2026-10-07, the FDA NDC Directory, openFDA shortages and openFDA drug labels.
 
 **In one paragraph:** public price files go into Databricks and are cleaned into a price history. An AI agent answers questions about that history using only read-only tools, and every number it gives is checked against the data. A second team of agents looks for unusual price moves each week, explains them, and a person approves the findings. Tests run on every code change, including a replay of 38 test questions.
@@ -105,6 +105,14 @@ Everything below ran on Azure against real public data: CMS NADAC weekly files f
 | **CI / GitHub Actions / run** | Continuous integration: on every push, GitHub Actions starts a run that installs the code and runs every test. Green means all passed. |
 | **Price-Watch signal / investigator / verifier** | A signal is an unusual price move found by SQL. An investigator is an agent that explains one signal. The verifier is code that re-checks the explanation against the data. |
 | **Peer NDCs** | Other packages of the same generic drug from other labelers. If they moved too, the change is market-wide. |
+| **Managed (helper) resource group** | A second folder Azure creates for a Databricks workspace to hold its internal parts. It is deleted with the workspace. |
+| **Budget** | A monthly spending limit in Azure that sends warning emails. It warns; it does not stop services. |
+| **Volume** | A folder of files inside Unity Catalog, with the same access controls as tables. The raw downloads live in one. |
+| **Lineage** | Unity Catalog's automatic record of which tables and jobs feed which others. |
+| **Asset Bundle** | Databricks jobs defined as code (`databricks.yml`) and deployed from Git, so they are not edited by hand. |
+| **Deployment (model)** | A named copy of an AI model in Azure that code can call, with its own version and limits. |
+| **Rate limit (TPM / RPM)** | The most tokens per minute (TPM) or requests per minute (RPM) a deployment accepts. It caps cost. |
+| **Version upgrade policy** | Whether Azure may switch a deployment to a newer model version on its own. "No auto-upgrade" keeps results comparable. |
 
 ### Step 1. Build the medallion pipeline on Azure Databricks
 
@@ -135,7 +143,7 @@ The synthetic data passed every test. Real CMS data found five problems the test
   price history live.
 - An export-only job task started no Spark session and **silently wrote nothing**. Fixed and tested.
 
-Result: **145 weekly NADAC files → 4,314,524 Silver rows → Gold: 961,568 history rows, 922,487 price
+Result: **145 weekly NADAC releases (in 3 yearly CMS files) → 4,314,524 Silver rows → Gold: 961,568 history rows, 922,487 price
 changes, 30,048 active NDCs, 380 in FDA shortage.** The job exports a Gold snapshot (Parquet → DuckDB)
 that the agents read.
 
@@ -230,8 +238,13 @@ Every finding waits for review, with the evidence from each tool call:
 ### Step 7. What it ran on
 
 One resource group, `rg-dpa`: the Databricks workspace (Central India), Azure AI Foundry with three
-pinned deployments (East US 2), and the AI Search service. `gpt-4.1-mini` is pinned to `2025-04-14`
-with a 30K tokens/min cap, so evals stay valid and the worst-case bill is bounded.
+model deployments (East US 2), and the AI Search service (Free tier). `gpt-4.1-mini` runs at version
+`2025-04-14` with a 30K tokens/min cap, which bounds the worst-case bill.
+
+One honest gap: the Bicep template in `infra/` creates the deployment with `NoAutoUpgrade`, so Azure
+can never swap the model under a passing baseline. This deployment was created by hand and kept
+Azure's default policy, *upgrade once a new default version is available* (see screenshot 28 below).
+A redeploy should use the template.
 
 ![rg-dpa resources and the model deployments](docs/screenshots/10-azure-resources.png)
 
@@ -259,15 +272,128 @@ No threshold was loosened. Run #45 replayed the v3 cassette with no misses and p
 
 **What to look for:** *Status Success*, both jobs green, and under *Eval gate: PASSED* a green tick on every check: the thresholds, the 7 critical questions, and the 4 comparisons with the baseline.
 
+### Step 9. A tour of every Azure service, captured before clean-up
+
+These were captured on 13 October 2026, just before the resource group `rg-dpa` was deleted to stop
+charges. They are the record of what ran in the cloud. Your subscription ID is blurred.
+
+#### 9.1 The resource group: one folder for the whole project
+
+![All resource groups in the subscription](docs/screenshots/14-azure-resource-groups.png)
+
+**What to look for:** `rg-dpa` (Central India) is this project's folder. `databricks-rg-dbw-dpa-i0uog0owph65h` is a helper
+folder that Azure created automatically for the Databricks workspace; it is deleted together with the workspace.
+The other groups belong to other projects and are not part of this one.
+
+![rg-dpa overview with its three services](docs/screenshots/15-rg-dpa-overview.png)
+
+**What to look for:** exactly three services, *Showing 3 of 3*: `aif-dpa-sujith` (Foundry, East US 2), `dbw-dpa`
+(Azure Databricks, Central India) and `srch-dpa-sujith` (AI Search, Central India). Deleting this group removes all three.
+
+![The monthly budget on rg-dpa](docs/screenshots/16-rg-dpa-budget.png)
+
+**What to look for:** a budget named `dpa-monthly-2000` of **₹2,000 per month**, resetting monthly, valid until September 2028.
+*Evaluated spend ₹0.00* means Azure had not yet reported any charge for October when this was captured; billing
+data usually arrives a day or two late. A budget only warns; it does not stop spending.
+
+#### 9.2 Azure Databricks: where the data was processed
+
+![The Databricks workspace in the Azure portal](docs/screenshots/17-databricks-workspace-azure.png)
+
+**What to look for:** *Status Active*, *Pricing Tier Premium* (needed for Unity Catalog), *Location Central India*,
+the workspace URL, and the tag `project : drug-pricing-agent`. **Launch Workspace** opens Databricks itself.
+
+![The weekly pipeline job and its run history](docs/screenshots/18-databricks-job-runs.png)
+
+**What to look for:** each bar is one run of the job; each square below it is one task (bronze, silver, gold,
+export). Red means failed, green succeeded, grey means the task did not run that time. The first runs failed and the
+latest runs succeeded; the bugs real data exposed, and their fixes, are listed in Step 2. On the right: *Paused - At 08:30 AM, only on Thursday*, the weekly schedule, kept paused on purpose.
+
+![The job's four tasks](docs/screenshots/19-databricks-job-tasks.png)
+
+**What to look for:** the chain bronze → silver → gold → export. Each task is a *Python script* that runs
+`jobs/run.py` from the workspace. The settings are greyed out because the job is defined in code
+(`databricks.yml`, a Databricks Asset Bundle) and deployed from Git, not edited by hand.
+
+![The landing volume with the raw downloads](docs/screenshots/20-landing-volume.png)
+
+**What to look for:** the volume `/Volumes/dbw_dpa/landing/raw` holds four folders: `nadac` (CMS price files),
+`ndc_directory` (FDA product list), `shortages` (FDA shortage list) and `exports` (the Gold snapshot the agents read).
+A volume is a folder of files that Unity Catalog controls access to.
+
+![The 2026 NADAC file from CMS](docs/screenshots/21-landing-nadac-2026-file.png)
+
+**What to look for:** CMS publishes **one cumulative file per year**; the 2026 file is **99.89 MB**. Each yearly file
+contains every weekly release of that year, so 3 yearly files (2024, 2025, 2026) hold the 145 weekly releases.
+
+![silver.nadac_prices columns](docs/screenshots/22-silver-nadac-prices-columns.png)
+
+**What to look for:** the Silver table's typed columns: `ndc11` (text), `nadac_per_unit` (decimal), `effective_date`
+and `as_of_date` (dates), `is_otc` (true/false). Bronze kept everything as text; Silver gives each column its real type.
+The purple box is a description Databricks' AI suggested; it was left unaccepted.
+
+![gold.nadac_price_history: the SCD2 history columns](docs/screenshots/23-gold-price-history-scd2.png)
+
+**What to look for:** `valid_from`, `valid_to` and `is_current`. Every price an NDC ever had is one row with the dates
+it applied; the row with `is_current = true` is today's price. `last_seen_as_of_date` records the last weekly release
+that listed the NDC, which is how drop-outs are handled.
+
+![gold.drug_price_current columns](docs/screenshots/24-gold-drug-price-current-columns.png)
+
+**What to look for:** the columns the agents read most: `current_price`, `price_90d_ago`, `pct_change_90d`,
+`price_1y_ago`, `pct_change_1y` and `in_shortage`. One row per active NDC (30,048 rows).
+
+![Lineage of gold.drug_price_current](docs/screenshots/25-gold-lineage.png)
+
+**What to look for:** lineage is Unity Catalog's automatic record of what feeds what. *Upstream* (inputs):
+`silver.ndc_products`, `silver.drug_shortages`, `gold.nadac_price_history` and the weekly job. *Downstream*
+(outputs): the `landing.raw` volume, where the export step writes the snapshot.
+
+#### 9.3 Azure AI Foundry: the AI models
+
+![The Foundry resource in the Azure portal](docs/screenshots/26-foundry-resource-azure.png)
+
+**What to look for:** `aif-dpa-sujith`, *API Kind AIServices*, *Location eastus2*, *Status Succeeded*.
+
+![The three model deployments](docs/screenshots/27-foundry-model-deployments.png)
+
+**What to look for:** a *deployment* is a named copy of a model the code can call. `gpt-4.1-mini` (version 2025-04-14)
+answered every question and ran Price-Watch; `embed` (text-embedding-3-small) turned label chunks into numbers for
+search; `chat` (gpt-5.4-mini) was deployed but not used in the results above.
+
+![gpt-4.1-mini deployment settings](docs/screenshots/28-gpt41mini-deployment-info.png)
+
+**What to look for:** *Rate limit 30,000 tokens per minute* and *30 requests per minute*, the cap that bounds cost.
+*Version upgrade policy: Once a new default version is available*, the gap described in Step 7. *Life cycle status
+Legacy* and *Model retirement date Apr 14, 2027*: Azure will retire this model version then, so the eval set would be
+re-run on its successor.
+
+![gpt-4.1-mini usage over 7 days](docs/screenshots/29-gpt41mini-usage-metrics.png)
+
+**What to look for:** the real usage for 6–13 October 2026: **513 requests** and **430.34K tokens** (412.14K sent to the
+model, 18.2K written by it), about 839 tokens per request. This counts
+everything that called `gpt-4.1-mini` that week.
+
+#### 9.4 Azure AI Search: the drug-label index
+
+![The AI Search service in the Azure portal](docs/screenshots/30-ai-search-service-azure.png)
+
+**What to look for:** `srch-dpa-sujith`, *Pricing tier Free*, *Status Running*, 1 replica, 1 partition, created
+13 Oct 2026. The Free tier costs nothing and is enough for 1,390 chunks; screenshot 09 shows the index and
+screenshot 03 a live search through it. The index stores each chunk with its drug name, section, title, text, DailyMed
+link and embedding (defined in `src/dpa/ai/labels.py`).
+
 ### Results at a glance
 
 | Area | Result |
 |---|---|
-| Data | 145 weekly NADAC files · 4,314,524 Silver rows |
+| Data | 145 weekly NADAC releases in 3 yearly CMS files · 4,314,524 Silver rows |
 | Gold | 961,568 history rows · 922,487 price changes · 30,048 NDCs · 380 in shortage |
 | Label search | 102 labels · 1,390 chunks · cited hits |
 | Ask agent | 94.7% (v1) → **100%** (v3) accuracy · 100% numbers grounded · **$0.00094 per answer** |
 | Price-Watch | 6 signals · **6/6 verified by code** · **$0.0146 per run** · 5 approved, 1 rejected |
+| Model usage | 513 requests · 430.34K tokens to `gpt-4.1-mini` in the week of the run (6–13 Oct 2026) |
+| Azure | 3 services in `rg-dpa` · ₹2,000/month budget · AI Search on the Free tier |
 | CI | Replayed eval gate on every push: all thresholds, 7 critical questions, no regression vs baseline |
 
 ### Design principle for the agents
