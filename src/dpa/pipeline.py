@@ -18,12 +18,17 @@ from dpa.config import Settings
 from dpa.store import DeltaStore, LocalStore, Store
 
 log = logging.getLogger("dpa")
-STEPS = ["ingest", "bronze", "silver", "gold"]
+STEPS = ["ingest", "bronze", "silver", "gold", "export"]
+AGENT_TABLES = ("drug_price_current", "fact_price_change", "nadac_price_history")
 
 
 def get_spark(local: bool) -> SparkSession:
     if not local:
         return SparkSession.builder.getOrCreate()
+    import os
+    import sys
+
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)  # workers use this venv (pandas/pyarrow)
     spark = (
         SparkSession.builder.master("local[*]")
         .appName("drug-pricing-agent")
@@ -86,15 +91,27 @@ def step_gold(store: Store, full_refresh: bool = False) -> None:
     quality.assert_no_errors(results)
 
 
+def step_export(store: Store, export_dir: str) -> None:
+    """Write the agent-facing Gold tables as Parquet. The Ask agent and dpa-mcp load this
+    snapshot into a locked, read-only DuckDB (dpa.agent.data.DuckDbGold)."""
+    import os
+
+    for t in AGENT_TABLES:
+        path = os.path.join(export_dir, t)
+        store.read("gold", t).coalesce(1).write.mode("overwrite").parquet(path)
+        log.info("exported gold.%s -> %s", t, path)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--step", choices=STEPS + ["all", "transform"], default="all",
-                   help="'transform' = bronze+silver+gold without downloading")
+                   help="'transform' = bronze+silver+gold+export without downloading")
     p.add_argument("--local", action="store_true", help="write Parquet under --local-dir instead of Delta")
     p.add_argument("--local-dir", default="_local")
     p.add_argument("--landing-dir", default=None)
     p.add_argument("--catalog", default=None)
     p.add_argument("--full-refresh", action="store_true", help="rebuild price history from all of Silver")
+    p.add_argument("--export-dir", default=None, help="default: <landing-dir>/exports/gold")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -103,6 +120,8 @@ def main(argv: list[str] | None = None) -> None:
         settings = Settings.from_env(catalog=args.catalog, landing_dir=f"{args.local_dir}/landing")
 
     steps = {"all": STEPS, "transform": STEPS[1:]}.get(args.step, [args.step])
+    export_dir = args.export_dir or (f"{args.local_dir}/exports/gold" if args.local
+                                     else f"{settings.landing_dir.rstrip('/')}/exports/gold")
 
     if "ingest" in steps:
         from dpa import ingest  # imported lazily: only this step needs internet access
@@ -117,6 +136,8 @@ def main(argv: list[str] | None = None) -> None:
             step_silver(store)
         if "gold" in steps:
             step_gold(store, full_refresh=args.full_refresh)
+        if "export" in steps:
+            step_export(store, export_dir)
 
 
 if __name__ == "__main__":

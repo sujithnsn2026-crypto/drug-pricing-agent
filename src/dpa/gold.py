@@ -12,8 +12,11 @@ Price history can be built two ways, and a test proves they agree:
 """
 from __future__ import annotations
 
+import datetime as dt
+
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
+from pyspark.sql import types as T
 
 HISTORY_COLUMNS = [
     "ndc11",
@@ -33,78 +36,101 @@ ATTRS = ["pricing_unit", "ndc_description", "rate_setting_class", "is_generic"]
 # --------------------------------------------------------------------------- #
 # SCD2: full rebuild
 # --------------------------------------------------------------------------- #
-def build_price_history(nadac: DataFrame) -> DataFrame:
-    """Gaps-and-islands over weekly observations.
+def versions_for_ndc(rows: list[dict], max_week: int) -> list[dict]:
+    """SCD2 versions for ONE NDC from its weekly observations sorted by week_idx.
 
-    A new version starts when the price differs from the previous week, or
-    when the NDC reappears after missing one or more weekly files.
+    Rules (the incremental MERGE applies exactly the same ones):
+    - same price in the next weekly file: the version continues
+    - new price with an effective date AFTER the version's start: close the version the
+      day before the new effective date and open a new one
+    - new price with an effective date ON OR BEFORE the version's start: CMS corrected the
+      price; update the current version in place (no new version)
+    - NDC missing from a weekly file: close the version at the last date it was seen; when it
+      comes back, the new version starts no earlier than the day after it was last seen
     """
+    out: list[dict] = []
+    cur: dict | None = None
+    one_day = dt.timedelta(days=1)
+
+    def open_version(o: dict, valid_from) -> dict:
+        return {"ndc11": o["ndc11"], "valid_from": valid_from, "valid_to": None,
+                "nadac_per_unit": o["nadac_per_unit"], "last_seen_as_of_date": o["as_of_date"],
+                "last_week": o["week_idx"], **{a: o[a] for a in ATTRS}}
+
+    for o in rows:
+        if cur is not None and o["week_idx"] == cur["last_week"] + 1:
+            if o["nadac_per_unit"] == cur["nadac_per_unit"] or o["effective_date"] <= cur["valid_from"]:
+                cur.update(nadac_per_unit=o["nadac_per_unit"], last_seen_as_of_date=o["as_of_date"],
+                           last_week=o["week_idx"], **{a: o[a] for a in ATTRS})
+                continue
+            cur["valid_to"] = o["effective_date"] - one_day
+            out.append(cur)
+            cur = open_version(o, o["effective_date"])
+        else:
+            valid_from = o["effective_date"]
+            if cur is not None:
+                cur["valid_to"] = cur["last_seen_as_of_date"]
+                out.append(cur)
+                valid_from = max(valid_from, cur["last_seen_as_of_date"] + one_day)
+            cur = open_version(o, valid_from)
+    if cur is not None:
+        if cur["last_week"] != max_week:
+            cur["valid_to"] = cur["last_seen_as_of_date"]
+        out.append(cur)
+    for v in out:
+        v["is_current"] = v["valid_to"] is None
+        v.pop("last_week", None)
+    return out
+
+
+def build_price_history(nadac: DataFrame) -> DataFrame:
+    """Full rebuild: run versions_for_ndc for every NDC (grouped map, one group per NDC)."""
     obs = nadac.where(
         F.col("ndc11").isNotNull()
         & F.col("as_of_date").isNotNull()
+        & F.col("effective_date").isNotNull()
         & F.col("nadac_per_unit").isNotNull()
     )
     weeks = obs.select("as_of_date").distinct().withColumn(
         "week_idx", F.dense_rank().over(Window.orderBy("as_of_date"))
     )
     max_week = weeks.agg(F.max("week_idx")).collect()[0][0]
-    obs = obs.join(weeks, "as_of_date")
-
-    w = Window.partitionBy("ndc11").orderBy("week_idx")
-    obs = (
-        obs.withColumn("prev_price", F.lag("nadac_per_unit").over(w))
-        .withColumn("prev_week", F.lag("week_idx").over(w))
-        .withColumn(
-            "is_new_version",
-            F.col("prev_price").isNull()
-            | (F.col("nadac_per_unit") != F.col("prev_price"))
-            | (F.col("week_idx") != F.col("prev_week") + 1),
-        )
-        .withColumn(
-            "version_no",
-            F.sum(F.col("is_new_version").cast("int")).over(
-                w.rowsBetween(Window.unboundedPreceding, Window.currentRow)
-            ),
-        )
+    obs = obs.join(weeks, "as_of_date").select(
+        "ndc11", "week_idx", "as_of_date", "effective_date", "nadac_per_unit", *ATTRS
     )
+    schema = obs.schema
+    out_schema = T.StructType([
+        T.StructField("ndc11", T.StringType()),
+        T.StructField("valid_from", T.DateType()),
+        T.StructField("valid_to", T.DateType()),
+        T.StructField("is_current", T.BooleanType()),
+        T.StructField("nadac_per_unit", schema["nadac_per_unit"].dataType),
+        *[T.StructField(a, schema[a].dataType) for a in ATTRS],
+        T.StructField("last_seen_as_of_date", T.DateType()),
+    ])
 
-    last_in_version = Window.partitionBy("ndc11", "version_no").orderBy(F.col("week_idx").desc())
-    first_in_version = Window.partitionBy("ndc11", "version_no").orderBy("week_idx")
-    versions = (
-        obs.withColumn("_first", F.row_number().over(first_in_version) == 1)
-        .withColumn("_last", F.row_number().over(last_in_version) == 1)
-        .groupBy("ndc11", "version_no")
-        .agg(
-            F.max(F.when(F.col("_first"), F.col("effective_date"))).alias("valid_from"),
-            F.max(F.when(F.col("_first"), F.col("nadac_per_unit"))).alias("nadac_per_unit"),
-            F.max("as_of_date").alias("last_seen_as_of_date"),
-            F.min("week_idx").alias("first_week"),
-            F.max("week_idx").alias("last_week"),
-            *[F.max(F.when(F.col("_last"), F.col(a))).alias(a) for a in ATTRS],
-        )
-    )
+    def per_ndc(pdf):
+        import pandas as pd
 
-    # The next version's first week tells us whether it came straight after
-    # this one (a price change) or after a gap (the NDC dropped out of NADAC).
-    vw = Window.partitionBy("ndc11").orderBy("version_no")
-    versions = versions.withColumn("next_valid_from", F.lead("valid_from").over(vw)).withColumn(
-        "next_first_week", F.lead("first_week").over(vw)
-    )
+        pdf = pdf.sort_values("week_idx")
+        rows = pdf.to_dict("records")
+        for r in rows:
+            for c in ("as_of_date", "effective_date"):
+                v = r[c]
+                if isinstance(v, dt.datetime) or not isinstance(v, dt.date):  # Timestamp / datetime64
+                    r[c] = pd.Timestamp(v).date()
+            r["week_idx"] = int(r["week_idx"])
+        vs = versions_for_ndc(rows, max_week)
+        return pd.DataFrame(vs, columns=[f.name for f in out_schema.fields])
 
-    contiguous_change = F.col("next_first_week") == F.col("last_week") + 1
-    still_listed = F.col("next_first_week").isNull() & (F.col("last_week") == F.lit(max_week))
-    return versions.select(
-        "ndc11",
-        "valid_from",
-        F.when(contiguous_change, F.date_sub("next_valid_from", 1))
-        .when(still_listed, F.lit(None).cast("date"))
-        .otherwise(F.col("last_seen_as_of_date"))
-        .alias("valid_to"),
-        still_listed.alias("is_current"),
-        "nadac_per_unit",
-        *ATTRS,
-        "last_seen_as_of_date",
-    ).select(*HISTORY_COLUMNS)
+    # Workers can't import this package (jobs run it from synced files, not an installed wheel),
+    # so ship this module's functions to them by value instead of by import path.
+    import sys
+
+    from pyspark import cloudpickle
+
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    return obs.groupBy("ndc11").applyInPandas(per_ndc, out_schema).select(*HISTORY_COLUMNS)
 
 
 # --------------------------------------------------------------------------- #
@@ -133,10 +159,17 @@ def scd2_staged_updates(history: DataFrame, week_obs: DataFrame) -> DataFrame:
     j = cur.join(inc, F.col("c.ndc11") == F.col("i.ndc11"), "full_outer")
 
     both = F.col("c.ndc11").isNotNull() & F.col("i.ndc11").isNotNull()
-    same_price = both & (F.col("c.nadac_per_unit") == F.col("i.nadac_per_unit"))
-    changed = both & (F.col("c.nadac_per_unit") != F.col("i.nadac_per_unit"))
+    differs = both & (F.col("c.nadac_per_unit") != F.col("i.nadac_per_unit"))
+    # same price, or a CMS correction (effective date not after the version start): update in place
+    continues = both & (~differs | (F.col("i.effective_date") <= F.col("c.valid_from")))
+    changed = differs & (F.col("i.effective_date") > F.col("c.valid_from"))
     dropped = F.col("c.ndc11").isNotNull() & F.col("i.ndc11").isNull()
     new_ndc = F.col("c.ndc11").isNull() & F.col("i.ndc11").isNotNull()
+
+    # For NDCs coming back after a gap: when were they last seen?
+    prev = (history.where(~F.col("is_current")).groupBy("ndc11")
+            .agg(F.max("last_seen_as_of_date").alias("prev_last_seen")).alias("p"))
+    j = j.join(prev, F.col("p.ndc11") == F.col("i.ndc11"), "left")
 
     def cur_row(**overrides):
         cols = []
@@ -144,8 +177,9 @@ def scd2_staged_updates(history: DataFrame, week_obs: DataFrame) -> DataFrame:
             cols.append(overrides.get(c, F.col(f"c.{c}")).alias(c))
         return cols
 
-    still_open = j.where(same_price).select(
+    still_open = j.where(continues).select(
         *cur_row(
+            nadac_per_unit=F.col("i.nadac_per_unit"),
             last_seen_as_of_date=F.col("i.as_of_date"),
             **{a: F.col(f"i.{a}") for a in ATTRS},
         ),
@@ -162,9 +196,12 @@ def scd2_staged_updates(history: DataFrame, week_obs: DataFrame) -> DataFrame:
         *cur_row(valid_to=F.col("c.last_seen_as_of_date"), is_current=F.lit(False)),
         F.lit("update").alias("_action"),
     )
+    new_start = F.when(new_ndc & F.col("p.prev_last_seen").isNotNull(),
+                       F.greatest(F.col("i.effective_date"), F.date_add(F.col("p.prev_last_seen"), 1))
+                       ).otherwise(F.col("i.effective_date"))
     inserted = j.where(changed | new_ndc).select(
         F.col("i.ndc11").alias("ndc11"),
-        F.col("i.effective_date").alias("valid_from"),
+        new_start.alias("valid_from"),
         F.lit(None).cast("date").alias("valid_to"),
         F.lit(True).alias("is_current"),
         F.col("i.nadac_per_unit").alias("nadac_per_unit"),

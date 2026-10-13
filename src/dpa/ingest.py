@@ -95,6 +95,20 @@ def find_nadac_download_urls(catalog_items: list[dict], years: Iterable[int]) ->
     return found
 
 
+def check_csv_header(path: str, required: str) -> None:
+    """Fail fast if a downloaded file is not the CSV we expect (compressed, HTML error page...)."""
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    try:
+        first = head.decode("utf-8-sig").splitlines()[0]
+    except (UnicodeDecodeError, IndexError):
+        os.remove(path)
+        raise ValueError(f"{os.path.basename(path)} is not a text CSV (compressed or binary download)")
+    if required.lower() not in first.lower():
+        os.remove(path)
+        raise ValueError(f"{os.path.basename(path)} header has no {required!r} column: {first[:120]!r}")
+
+
 def ingest_nadac(settings: Settings, today: dt.date | None = None) -> list[str]:
     today = today or dt.date.today()
     years = range(today.year - settings.nadac_backfill_years, today.year + 1)
@@ -123,7 +137,11 @@ def ingest_nadac(settings: Settings, today: dt.date | None = None) -> list[str]:
         os.makedirs(folder, exist_ok=True)
         tmp = target + ".part"
         with _get(session, url, stream=True) as r, open(tmp, "wb") as f:
+            # CMS sometimes serves the file with Content-Encoding: gzip. r.raw is the
+            # undecoded socket stream, so without this the .csv on disk is gzip bytes.
+            r.raw.decode_content = True
             shutil.copyfileobj(r.raw, f, length=1024 * 1024)
+        check_csv_header(tmp, required="NDC")
 
         # The current-year file is cumulative and republished weekly, so the
         # newest copy replaces older ones instead of duplicating every week.
