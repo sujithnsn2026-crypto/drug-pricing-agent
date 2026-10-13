@@ -357,6 +357,71 @@ counts each table directly: **145** weekly releases and **4,314,524** rows in Si
 README, now proven from the tables themselves. (The sixth row, 30,048 current NDCs, is just below the visible area;
 screenshots 02b and 03 show it.)
 
+#### 9.2b Proof from SQL: the tables answer for themselves
+
+Eight read-only queries were run in the Databricks SQL Editor on 13 October 2026, before clean-up. They are saved in
+[`docs/sql/proof_queries.sql`](docs/sql/proof_queries.sql), so anyone can re-run them.
+
+![Query 1: CMS files, weekly releases and rows per year](docs/screenshots/32-sql-releases-per-year.png)
+
+**What to look for:** exactly **1 CMS file per year**. 2024 had 52 weekly releases (1,497,925 rows), 2025 had 53
+(1,608,416 rows) and 2026 had 40 so far (1,208,183 rows, 7 Jan to 7 Oct). Together: **145 releases and 4,314,524 rows**,
+the totals quoted everywhere in this README.
+
+![Query 2: the FDA shortage list in Silver](docs/screenshots/33-sql-shortage-list.png)
+
+**What to look for:** one row per drug and company. *status* is *Current* (in shortage now) or *To Be Discontinued*;
+*availability* is *Available*, *Unavailable* or *Limited Availability*; *shortage_reason* is FDA's own words, such as
+"Demand increase for the drug". Many reasons are blank because FDA does not always give one. This free-text field is
+where a red-team test plants a fake instruction, which the agent's guardrail removes.
+
+![Query 3: one drug's full price history](docs/screenshots/34-sql-scd2-verapamil-history.png)
+
+**What to look for:** SCD2 in practice. Verapamil ER 240 mg (Mylan, NDC 00378644001) has one row per price. Today's
+price, **$3.14760 from 2026-09-23**, has an empty `valid_to` and `is_current = true`. Each older row ends the day before
+the next one starts, so there are no gaps or overlaps. It also puts the agent's "+175.55% in 90 days" in context: the
+price had fallen from $2.71899 in March to $1.14231 in June, so part of the jump is a rebound from that low.
+
+![Query 4: biggest single price changes since July](docs/screenshots/35-sql-price-changes.png)
+
+**What to look for:** each row is one dated price change. Milnacipran 12.5 mg rose **77.59% on 2026-09-23** for 3
+labelers at once, and vardenafil 10 mg rose **49.79%** for 5 labelers. These are the moves Price-Watch labelled
+`market_wide_move`. Diflorasone cream's +55.18% is also a Price-Watch signal. Dilantin is absent because this query
+shows generics only, and Dilantin is a brand.
+
+![Query 5: the rows behind the Ask agent's answer](docs/screenshots/36-sql-agent-answer-proof.png)
+
+**What to look for:** verapamil 240 mg at **+175.55%** ($1.14231 → $3.14760) and timolol eye drops at **+90.83%**, all
+with `in_shortage = false`. That is exactly what the Ask agent said in screenshot 06, so its answer is checked against
+the table by hand as well as by code.
+
+![Query 6: drugs in shortage with the biggest 1-year rise](docs/screenshots/37-sql-shortage-price-rises.png)
+
+**What to look for:** shortages and price rises together. Water for injection vials rose **212.48%** in a year (to
+$0.31501/mL), bacteriostatic water **145.2%**, lorazepam 2 mg/mL **99.38%** and fentanyl vials **76.33%**. Different
+labelers show the same price because NADAC usually reports one average for all makers of the same generic product.
+
+![Query 7: data-quality results, rows 1-14](docs/screenshots/38-sql-dq-results-1.png)
+
+**What to look for:** every check the pipeline ran, with how many rows it checked and how many failed. All
+*error*-level checks pass with 0 failures: 4,314,524 Silver price rows, 1,560 shortage rows, 256,934 FDA product rows,
+and 961,568 Gold history rows with exactly one current price for each of 30,048 NDCs. One *warn*-level check,
+`effective_not_after_as_of`, flags **289 rows** whose effective date is later than their release date. A warning is
+logged but does not stop the job.
+
+![Query 7: data-quality results, rows 15-28](docs/screenshots/39-sql-dq-results-2.png)
+
+**What to look for:** row 28. An earlier Gold run (run ID `20261013T040314Z`) failed `valid_range` on **1 row**: one
+price version ended before it began, the future-effective-date bug from Step 2. Because Gold writes, then audits, then
+publishes, that bad history was never published. After the fix, the next run (`20261013T042024Z`, rows 12–15)
+passed every check.
+
+![Query 8: the price history table's write log](docs/screenshots/40-sql-delta-history.png)
+
+**What to look for:** a single version, **0**, written by `CREATE OR REPLACE TABLE AS SELECT` at 04:20 UTC (09:50 IST),
+under your account, which the job runs as. That is the publish step of the passing run above. The table has no
+earlier version, so the failed 04:03 run never wrote to it: write-audit-publish doing its job.
+
 #### 9.3 Azure AI Foundry: the AI models
 
 ![The Foundry resource in the Azure portal](docs/screenshots/26-foundry-resource-azure.png)
@@ -402,6 +467,7 @@ link and embedding (defined in `src/dpa/ai/labels.py`).
 | Price-Watch | 6 signals · **6/6 verified by code** · **$0.0146 per run** · 5 approved, 1 rejected |
 | Model usage | 513 requests · 430.34K tokens to `gpt-4.1-mini` in the week of the run (6–13 Oct 2026) |
 | Azure | 3 services in `rg-dpa` · ₹2,000/month budget · AI Search on the Free tier |
+| SQL proof | 8 read-only queries confirm every count; all error-level data checks pass; 289 rows flagged as a warning |
 | CI | Replayed eval gate on every push: all thresholds, 7 critical questions, no regression vs baseline |
 
 ### Design principle for the agents
