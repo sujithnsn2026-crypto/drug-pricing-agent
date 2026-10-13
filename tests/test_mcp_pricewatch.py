@@ -104,6 +104,34 @@ def test_parse_json_cleans_tool_names_and_prompt_defines_every_cause():
     assert all(f"- {c}:" in pricewatch.INVESTIGATOR_SYSTEM for c in pricewatch.CAUSES)
 
 
+def _gold_with_peer(tmp_path):
+    """Fixture Gold plus a second amoxicillin NDC from another labeler that moved up in the same week."""
+    import duckdb
+    src, out = DEFAULT_FIXTURE, tmp_path / "gold"
+    out.mkdir()
+    con = duckdb.connect()
+    for t in ("drug_price_current", "fact_price_change", "nadac_price_history"):
+        con.execute(f"CREATE TABLE {t} AS SELECT * FROM read_parquet('{src}/{t}.parquet')")
+    con.execute("INSERT INTO drug_price_current SELECT * REPLACE ('70010000199' AS ndc11, 'Peer Labs' AS labeler_name) "
+                "FROM drug_price_current WHERE ndc11 = '70010000101'")
+    con.execute("INSERT INTO fact_price_change SELECT * REPLACE ('70010000199' AS ndc11, pct_change - 10 AS pct_change, "
+                "'AMOXICILLIN PEER' AS ndc_description) FROM fact_price_change WHERE ndc11 = '70010000101'")
+    for t in ("drug_price_current", "fact_price_change", "nadac_price_history"):
+        con.execute(f"COPY {t} TO '{out}/{t}.parquet' (FORMAT parquet)")
+    return DuckDbGold(str(out))
+
+
+def test_detect_counts_peers_and_verifier_rejects_single_labeler_story(tmp_path, db):
+    lone = pricewatch.detect(db, days=120, threshold=20, top=10)
+    assert all(s["peer_ndcs_moved"] == 0 for s in lone)
+    sig = pricewatch.detect(_gold_with_peer(tmp_path), days=120, threshold=20, top=1)[0]
+    assert sig["ndc11"] == "70010000101" and sig["peer_ndcs_moved"] == 1 and sig["peer_labelers_moved"] == ["Peer Labs"]
+    issues = pricewatch.verify(_report(sig) | {"likely_cause": "labeler_price_action"}, sig)
+    assert any("Peer Labs" in i for i in issues)
+    assert pricewatch.verify(_report(sig) | {"likely_cause": "market_wide_move"}, sig) == []
+    assert pricewatch.verify(_report(lone[0]) | {"likely_cause": "labeler_price_action"}, lone[0]) == []
+
+
 def _report(sig, **over):
     facts = {"old_price": sig["old_price"], "new_price": sig["new_price"], "pct_change": sig["pct_change"],
              "change_date": str(sig["change_date"])[:10], "in_shortage": sig["in_shortage"]}

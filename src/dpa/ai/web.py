@@ -38,7 +38,7 @@ code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:var(--soft);color:var(--accent)}
 .bad{background:#f6e6d2;color:var(--amber)}
 </style>"""
-NAV = '<nav><a href="/">Ask</a><a href="/review">Price-Watch review</a><a href="/brief">Latest brief</a></nav>'
+NAV = '<nav><a href="./">Ask</a><a href="review">Price-Watch review</a><a href="brief">Latest brief</a></nav>'
 
 
 @functools.lru_cache(maxsize=1)
@@ -68,7 +68,7 @@ def home() -> str:
 const out=document.getElementById('out'), esc=s=>String(s??'').replace(/[&<]/g,c=>c=='&'?'&amp;':'&lt;');
 document.getElementById('f').onsubmit=async e=>{{e.preventDefault();const q=document.getElementById('q').value.trim();if(!q)return;
 const card=document.createElement('div');card.className='card';card.innerHTML='<b>'+esc(q)+'</b><p class=meta>Working…</p>';out.prepend(card);
-const r=await fetch('/api/ask',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{question:q}})}});const d=await r.json();
+const r=await fetch('api/ask',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{question:q}})}});const d=await r.json();
 const steps=d.steps||[];const rows=steps.filter(s=>s.kind=='tool').map(s=>'<tr><td><code>'+esc(s.name)+'</code></td><td><code>'+esc(String(s.arguments||'').slice(0,140))+'</code></td><td>'+(s.ok?'ok':'error')+'</td><td>'+(s.rows??'')+'</td></tr>').join('');
 card.innerHTML='<b>'+esc(q)+'</b><div class=ans>'+esc(d.answer||d.detail)+'</div><p class=meta>'+(d.tools_called||[]).length+' tool calls · '+(d.model_calls??'')+' model calls · '+Math.round(d.latency_ms||0)+' ms · cost '+(d.cost_usd!=null?'$'+Number(d.cost_usd).toFixed(5):'unknown')+(d.ungrounded_numbers&&d.ungrounded_numbers.length?' · ungrounded: '+esc(d.ungrounded_numbers.join(', ')):'')+' · '+esc(d.status)+'</p>'+(rows?'<details><summary class=meta>Agent trace</summary><table><tr><th>Tool</th><th>Arguments</th><th>Result</th><th>Rows</th></tr>'+rows+'</table></details>':'');}};
 </script>"""
@@ -112,7 +112,7 @@ def review_page() -> str:
 <p class=sub>NADAC as of {e(str(m.get('as_of_date')))} · {m['signals']} signals · {m['verified']} verified by code ·
  model {e(str(m['model']))} · cost {('$' + str(m.get('cost_usd'))) if m.get('cost_usd') is not None else 'unknown'}.
  Approve findings to include them in the brief.</p>{''.join(cards)}</div>
-<script>async function decide(id,action){{await fetch('/api/review',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+<script>async function decide(id,action){{await fetch('api/review',{{method:'POST',headers:{{'Content-Type':'application/json'}},
 body:JSON.stringify({{run:{json.dumps(os.path.basename(run))},id,action}})}});location.reload();}}</script>"""
 
 
@@ -135,4 +135,4 @@ def brief() -> str:
     if not run:
         raise HTTPException(404, "No runs yet")
     pricewatch.publish(run)
-    return open(os.path.join(run, "brief.html")).read().replace("<h1>", NAV + "<h1>", 1)
+    return open(os.path.join(run, "brief.html")).read().replace("<h1>", NAV.replace("<nav>", '<nav style="display:flex;gap:14px;font-weight:600">') + "<h1>", 1)

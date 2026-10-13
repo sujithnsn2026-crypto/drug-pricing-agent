@@ -29,10 +29,13 @@ from dpa.ai.mcp_agent import MCPAgent, mcp_session
 from dpa.llmops.cost import cost_usd, load_prices
 from dpa.llmops.tracing import get_tracer, setup_tracing, shutdown_tracing
 
-CAUSES = ["labeler_price_action", "shortage", "recall_or_discontinuation", "supplier_exit",
+CAUSES = ["labeler_price_action", "market_wide_move", "shortage", "recall_or_discontinuation", "supplier_exit",
           "brand_generic_shift", "market_correction", "unknown"]
 CAUSE_GUIDE = """Pick likely_cause by what the tools showed:
 - labeler_price_action: only this NDC/labeler moved; other labelers of the same generic are stable
+  (the signal's peer_ndcs_moved counts other NDCs of this generic that moved the same way in the window;
+  if it is above 0 this is NOT a single-labeler action)
+- market_wide_move: several labelers of the same generic moved the same way, with no FDA shortage listed
 - shortage: FDA lists this product or its generic as in shortage
 - supplier_exit: other labelers of the same generic stopped reporting or were discontinued, leaving fewer sellers
 - recall_or_discontinuation: this product is being recalled or discontinued
@@ -56,11 +59,29 @@ moves AS (
     AND abs(c.pct_change) >= {threshold}
     AND c.old_price > 0
     AND c.old_price >= {min_price}
+),
+-- every NDC of the same generic that moved the same way in the window (any price level):
+-- tells a market-wide move apart from one labeler's action, before any model sees the signal
+peers AS (
+  SELECT lower(p.generic_name) AS g, sign(c.pct_change) AS dir,
+         list(DISTINCT c.ndc11) AS ndcs, list(DISTINCT p.labeler_name) AS labelers
+  FROM fact_price_change c
+  JOIN drug_price_current p ON p.ndc11 = c.ndc11
+  CROSS JOIN ref
+  WHERE CAST(c.change_date AS DATE) > CAST(ref.d AS DATE) - INTERVAL {days} DAY
+    AND abs(c.pct_change) >= {threshold}
+    AND c.old_price > 0
+    AND p.generic_name IS NOT NULL
+  GROUP BY 1, 2
 )
-SELECT ndc11, ndc_description, change_date, old_price, new_price, pct_change, pricing_unit,
-       is_generic, generic_name, labeler_name, in_shortage
-FROM moves WHERE rn = 1
-ORDER BY abs(pct_change) DESC, ndc11
+SELECT m.ndc11, m.ndc_description, m.change_date, m.old_price, m.new_price, m.pct_change, m.pricing_unit,
+       m.is_generic, m.generic_name, m.labeler_name, m.in_shortage,
+       coalesce(len(list_filter(pe.ndcs, x -> x <> m.ndc11)), 0) AS peer_ndcs_moved,
+       coalesce(list_filter(pe.labelers, x -> x IS NOT NULL AND x <> m.labeler_name), []) AS peer_labelers_moved
+FROM moves m
+LEFT JOIN peers pe ON pe.g = lower(m.generic_name) AND pe.dir = sign(m.pct_change)
+WHERE m.rn = 1
+ORDER BY abs(m.pct_change) DESC, m.ndc11
 LIMIT {top}
 """
 
@@ -135,6 +156,11 @@ def verify(report: dict, signal: dict) -> list[str]:
         issues.append(f"in_shortage {facts.get('in_shortage')} does not match the data ({signal.get('in_shortage')})")
     if report.get("likely_cause") not in CAUSES:
         issues.append(f"likely_cause must be one of {CAUSES}")
+    peers = int(signal.get("peer_ndcs_moved") or 0)
+    if report.get("likely_cause") == "labeler_price_action" and peers > 0:
+        labs = ", ".join(map(str, (signal.get("peer_labelers_moved") or [])[:4])) or "other labelers"
+        issues.append(f"likely_cause labeler_price_action contradicts the data: {peers} other NDC(s) of this "
+                      f"generic moved the same way in the window ({labs})")
     if report.get("confidence") not in ("high", "medium", "low"):
         issues.append("confidence must be high, medium or low")
     # any percentage quoted in the prose must be this signal's change (catches numbers made up in text)
