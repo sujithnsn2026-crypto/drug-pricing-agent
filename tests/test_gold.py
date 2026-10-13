@@ -56,6 +56,22 @@ def test_relisting_never_starts_before_last_seen():
     ]
 
 
+def test_future_effective_date_then_dropout_never_ends_before_it_starts():
+    w = lambda i, eff, p: {"ndc11": "x", "week_idx": i, "as_of_date": D(2025, 12, 24) + dt.timedelta(weeks=i - 1),  # noqa: E731
+                           "effective_date": eff, "nadac_per_unit": p, "pricing_unit": "EA",
+                           "ndc_description": "d", "rate_setting_class": "G", "is_generic": True}
+    # Real case from CMS (NDC 00009766701): listed Dec 31 with an effective date of Jan 1, then gone,
+    # then back in week 4 with an older effective date.
+    vs = gold.versions_for_ndc([w(1, D(2025, 12, 1), 50), w(2, D(2026, 1, 1), 60), w(4, D(2025, 12, 15), 60)],
+                               max_week=4)
+    assert [(v["valid_from"], v["valid_to"]) for v in vs] == [
+        (D(2025, 12, 1), D(2025, 12, 31)),
+        (D(2026, 1, 1), D(2026, 1, 1)),    # ends on its own start, not on Dec 31 (last seen)
+        (D(2026, 1, 2), None),             # re-listing starts after the previous version ended
+    ]
+    assert all(v["valid_to"] is None or v["valid_to"] >= v["valid_from"] for v in vs)
+
+
 def test_history_shape(history):
     assert history.count() == 10
     assert history.where("is_current").count() == 6
