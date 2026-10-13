@@ -36,6 +36,12 @@ ATTRS = ["pricing_unit", "ndc_description", "rate_setting_class", "is_generic"]
 # --------------------------------------------------------------------------- #
 # SCD2: full rebuild
 # --------------------------------------------------------------------------- #
+def _dropout_end(v: dict):
+    """A version closed by a drop-out ends on the last day it was seen, but never before its
+    own start (CMS sometimes lists a price with a future effective date)."""
+    return max(v["last_seen_as_of_date"], v["valid_from"])
+
+
 def versions_for_ndc(rows: list[dict], max_week: int) -> list[dict]:
     """SCD2 versions for ONE NDC from its weekly observations sorted by week_idx.
 
@@ -45,8 +51,9 @@ def versions_for_ndc(rows: list[dict], max_week: int) -> list[dict]:
       day before the new effective date and open a new one
     - new price with an effective date ON OR BEFORE the version's start: CMS corrected the
       price; update the current version in place (no new version)
-    - NDC missing from a weekly file: close the version at the last date it was seen; when it
-      comes back, the new version starts no earlier than the day after it was last seen
+    - NDC missing from a weekly file: close the version at the last date it was seen (or its start,
+      if the effective date was in the future); when it comes back, the new version starts no
+      earlier than the day after the previous version ended
     """
     out: list[dict] = []
     cur: dict | None = None
@@ -69,13 +76,13 @@ def versions_for_ndc(rows: list[dict], max_week: int) -> list[dict]:
         else:
             valid_from = o["effective_date"]
             if cur is not None:
-                cur["valid_to"] = cur["last_seen_as_of_date"]
+                cur["valid_to"] = _dropout_end(cur)
                 out.append(cur)
-                valid_from = max(valid_from, cur["last_seen_as_of_date"] + one_day)
+                valid_from = max(valid_from, cur["valid_to"] + one_day)
             cur = open_version(o, valid_from)
     if cur is not None:
         if cur["last_week"] != max_week:
-            cur["valid_to"] = cur["last_seen_as_of_date"]
+            cur["valid_to"] = _dropout_end(cur)
         out.append(cur)
     for v in out:
         v["is_current"] = v["valid_to"] is None
@@ -166,9 +173,9 @@ def scd2_staged_updates(history: DataFrame, week_obs: DataFrame) -> DataFrame:
     dropped = F.col("c.ndc11").isNotNull() & F.col("i.ndc11").isNull()
     new_ndc = F.col("c.ndc11").isNull() & F.col("i.ndc11").isNotNull()
 
-    # For NDCs coming back after a gap: when were they last seen?
+    # For NDCs coming back after a gap: when did their previous version end?
     prev = (history.where(~F.col("is_current")).groupBy("ndc11")
-            .agg(F.max("last_seen_as_of_date").alias("prev_last_seen")).alias("p"))
+            .agg(F.max("valid_to").alias("prev_end")).alias("p"))
     j = j.join(prev, F.col("p.ndc11") == F.col("i.ndc11"), "left")
 
     def cur_row(**overrides):
@@ -193,11 +200,12 @@ def scd2_staged_updates(history: DataFrame, week_obs: DataFrame) -> DataFrame:
         F.lit("update").alias("_action"),
     )
     closed_by_dropout = j.where(dropped).select(
-        *cur_row(valid_to=F.col("c.last_seen_as_of_date"), is_current=F.lit(False)),
+        *cur_row(valid_to=F.greatest(F.col("c.last_seen_as_of_date"), F.col("c.valid_from")),
+                 is_current=F.lit(False)),
         F.lit("update").alias("_action"),
     )
-    new_start = F.when(new_ndc & F.col("p.prev_last_seen").isNotNull(),
-                       F.greatest(F.col("i.effective_date"), F.date_add(F.col("p.prev_last_seen"), 1))
+    new_start = F.when(new_ndc & F.col("p.prev_end").isNotNull(),
+                       F.greatest(F.col("i.effective_date"), F.date_add(F.col("p.prev_end"), 1))
                        ).otherwise(F.col("i.effective_date"))
     inserted = j.where(changed | new_ndc).select(
         F.col("i.ndc11").alias("ndc11"),
