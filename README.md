@@ -403,8 +403,8 @@ labelers show the same price because NADAC usually reports one average for all m
 
 ![Query 7: data-quality results, rows 1-14](docs/screenshots/38-sql-dq-results-1.png)
 
-**What to look for:** every check the pipeline ran, with how many rows it checked and how many failed. All
-*error*-level checks pass with 0 failures: 4,314,524 Silver price rows, 1,560 shortage rows, 256,934 FDA product rows,
+**What to look for:** every check the pipeline ran, with how many rows it checked and how many failed. In the latest runs (rows 1–14), every
+*error*-level check passes with 0 failures: 4,314,524 Silver price rows, 1,560 shortage rows, 256,934 FDA product rows,
 and 961,568 Gold history rows with exactly one current price for each of 30,048 NDCs. One *warn*-level check,
 `effective_not_after_as_of`, flags **289 rows** whose effective date is later than their release date. A warning is
 logged but does not stop the job.
