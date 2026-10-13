@@ -1,0 +1,65 @@
+{
+  "run": {
+    "created_utc": "2026-10-13T03:56:28+00:00",
+    "mode": "record",
+    "model": "gpt-4.1-mini",
+    "prompt": "ask_agent@v3#60233f7c41fa",
+    "git_sha": "d61c18f",
+    "golden_items": 38
+  },
+  "metrics": {
+    "n": 38,
+    "accuracy": 1.0,
+    "by_category": {
+      "aggregate": {
+        "n": 3,
+        "accuracy": 1.0
+      },
+      "history": {
+        "n": 5,
+        "accuracy": 1.0
+      },
+      "injection": {
+        "n": 6,
+        "accuracy": 1.0
+      },
+      "lookup": {
+        "n": 6,
+        "accuracy": 1.0
+      },
+      "not_found": {
+        "n": 2,
+        "accuracy": 1.0
+      },
+      "out_of_scope": {
+        "n": 4,
+        "accuracy": 1.0
+      },
+      "ranking": {
+        "n": 7,
+        "accuracy": 1.0
+      },
+      "shortage": {
+        "n": 5,
+        "accuracy": 1.0
+      }
+    },
+    "grounding_rate": 1.0,
+    "grounding_retry_rate": 0.0,
+    "tool_selection_accuracy": 1.0,
+    "refusal_recall": 1.0,
+    "false_refusal_rate": 0.0,
+    "injection_block_rate": 1.0,
+    "run_sql_rate": 0.1667,
+    "tool_error_rate": 0.0244,
+    "errors": 0,
+    "p50_latency_ms": 2360.4,
+    "p95_latency_ms": 6547.2,
+    "avg_model_calls": 2.03,
+    "avg_input_tokens": 2239,
+    "avg_output_tokens": 72,
+    "avg_cost_usd": 0.000938,
+    "total_cost_usd": 0.035655,
+    "failed_ids": []
+  }
+}
