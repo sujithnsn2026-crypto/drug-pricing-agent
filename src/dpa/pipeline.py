@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         from dpa import ingest  # imported lazily: only this step needs internet access
         ingest.ingest_all(settings)
 
-    if set(steps) & {"bronze", "silver", "gold"}:
+    if set(steps) & {"bronze", "silver", "gold", "export"}:
         spark = get_spark(args.local)
         store = LocalStore(spark, args.local_dir) if args.local else DeltaStore(spark, settings)
         if "bronze" in steps:
