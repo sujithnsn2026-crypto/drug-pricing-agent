@@ -53,11 +53,11 @@ the MCP tool server and the Price-Watch workflow. See
 | 4a | Ask agent: Azure OpenAI tool calling over Gold with read-only tools and a parsed SQL guard | ✅ done |
 | 6 | **LLMOps:** golden eval set (38 questions incl. red-team), deterministic scoring, record/replay, eval-gated CI, prompt registry, OpenTelemetry → App Insights, cost per answer, injection + number-grounding guardrails, KQL monitoring, Bicep | ✅ done |
 | 2 | Drug labels in Azure AI Search: hybrid search, citations | ✅ done (102 labels, 1,390 chunks) |
-| 3 | `dpa-mcp` server: the same read-only tools served over MCP | ✅ done (stdio; managed identity next) |
+| 3 | `dpa-mcp` server: the same read-only tools served over MCP | ✅ done (stdio, and streamable HTTP at `/mcp` on the live app) |
 | 4b | Move the Ask agent onto Azure AI Foundry Agent Service using the MCP tools | |
 | 5 | Price-Watch workflow: SQL signal finder, parallel investigators, code verifier, human approval | ✅ done (first real run: 6/6 verified) |
 | 6b | Calibrated LLM judge for free-text quality, trajectory evals, online feedback loop | |
-| 7 | Terraform, FastAPI + review UI on Container Apps, write-up and demo video | FastAPI UI runs locally; hosting next |
+| 7 | Hosting: UI + agent + MCP on Container Apps from one Bicep template, keyless (managed identity + OIDC), App Insights, weekly data refresh | ✅ live ([Step 10](#step-10-host-it-live-keyless-and-fix-what-live-traffic-found-19-october-2026)) |
 
 ## How this was built and what the first real-data run showed
 
@@ -244,7 +244,8 @@ model deployments (East US 2), and the AI Search service (Free tier). `gpt-4.1-m
 One honest gap: the Bicep template in `infra/` creates the deployment with `NoAutoUpgrade`, so Azure
 can never swap the model under a passing baseline. This deployment was created by hand and kept
 Azure's default policy, *upgrade once a new default version is available* (see screenshot 28 below).
-A redeploy should use the template.
+A redeploy should use the template. **Closed in Step 10:** the redeployed model runs with `NoAutoUpgrade` from the
+template (screenshot 56).
 
 ![rg-dpa resources and the model deployments](docs/screenshots/10-azure-resources.png)
 
@@ -456,6 +457,188 @@ everything that called `gpt-4.1-mini` that week.
 screenshot 03 a live search through it. The index stores each chunk with its drug name, section, title, text, DailyMed
 link and embedding (defined in `src/dpa/ai/labels.py`).
 
+### Step 10. Host it live, keyless, and fix what live traffic found (19 October 2026)
+
+**Live app:** <https://ca-dpa-web.blackocean-cc3b3637.centralindia.azurecontainerapps.io> · the MCP endpoint is
+`/mcp` on the same host (bearer token). The app scales to zero, so the first visit after a quiet spell takes a few
+seconds to wake it.
+
+After the Step 9 clean-up nothing was running. This step puts the Ask agent, the Price-Watch review page and the
+MCP tool server online from code, and closes the gaps Steps 7 and 9 listed: a model that could auto-upgrade,
+monitoring that was never deployed, and keys.
+
+```mermaid
+flowchart LR
+    GH[GitHub main] -- image.yml --> GHCR[(ghcr.io image<br/>public, free)]
+    GH -- data-refresh.yml<br/>weekly --> REL[(Release data-latest<br/>Gold snapshot)]
+    REL -- Cloud Shell upload --> AF[(Azure Files<br/>dpa-data)]
+    subgraph RG[rg-dpa, one Bicep template]
+        CA[Container App ca-dpa-web<br/>UI + Ask agent + /mcp<br/>0..1 replicas] --> AF
+        CA -- managed identity --> AOAI[Azure OpenAI<br/>gpt-4.1-mini, keys disabled,<br/>NoAutoUpgrade, 30K TPM]
+        CA -- OpenTelemetry --> AI[(App Insights<br/>+ Log Analytics 1 GB/day)]
+        BUD{{Budget ₹2,000 · alert on<br/>ungrounded answers}}
+    end
+    GHCR --> CA
+    EV[eval-live.yml] -- OIDC, no secret --> AOAI
+```
+
+**What changed in the code**
+
+| Piece | Where | Why |
+|---|---|---|
+| One process serves the UI, the agent API and MCP over streamable HTTP | `src/dpa/ai/web.py`, `src/dpa/ai/mcp_server.py` | One container, one in-memory copy of Gold, one thing to scale to zero. MCP is stateless (any replica can answer) and needs `Authorization: Bearer`. |
+| Public limits | `web.py` (`Limiter`) | 200 questions per UTC day across all visitors and 20 per IP per hour. With at most one replica the counts are exact, and the daily cap bounds the model bill (about $0.16 a day at today's cost per answer). |
+| Price-Watch review is read-only for visitors | `web.py` | Approve/Reject need a reviewer token, typed into a password field and sent as a header. It never goes in a URL, where it would end up in history and logs. |
+| Container image | `Dockerfile`, `.github/workflows/image.yml` | Non-root, health check, Gold mounted at `/data` (not baked in, so a data refresh needs no new image). Built, smoke-tested (`/healthz`, 401 without token, `tools/list` with it) and published to GHCR on every push. |
+| Real Gold without Databricks | `.github/workflows/data-refresh.yml` | The same pipeline code in local Spark mode on a free GitHub runner, every Thursday. Data-quality checks gate the Gold write; the snapshot is loaded in the agent's locked DuckDB before it is released. Databricks stays the production path (Steps 1–2) for when data or users grow. |
+| Whole serving stack as code | `infra/main.bicep` | Log Analytics (1 GB/day cap) + App Insights, a storage account and file share, Azure OpenAI with `disableLocalAuth` (no keys exist) and `NoAutoUpgrade`, the Container Apps environment and app (0–1 replicas, system-assigned identity with *Cognitive Services OpenAI User* on the model only), budget, and the grounding alert. |
+| Keyless live evals from CI | `.github/workflows/eval-live.yml` | GitHub's OIDC token is exchanged for an Entra token through a federated credential. The app registration has no secret, and its only permission is calling the model. |
+
+#### 10.1 Build and check the image
+
+![The container image tested locally](docs/screenshots/41-container-local-test.png)
+
+**What to look for:** `/healthz` answers, `/mcp` returns **401** without the token and lists the five read-only tools
+with it, the container is *healthy* and runs as an unprivileged user (`uid=10001`). This used the synthetic fixture
+(`synthetic_data: true`), because no data was mounted.
+
+![The image workflow on GitHub](docs/screenshots/42-image-build-ghcr.png)
+
+**What to look for:** *Status Success* and the published tag `ghcr.io/sujithnsn2026-crypto/drug-pricing-agent:sha-481f6cc`.
+
+#### 10.2 Rebuild the real Gold data
+
+![The data-refresh run](docs/screenshots/43-data-refresh-run.png)
+
+**What to look for:** downloading the public files took **13 s**; Bronze → Silver → Gold, with every data-quality check,
+took **2 min 21 s** on a 4-core runner.
+
+![The data-latest release](docs/screenshots/44-data-latest-release.png)
+
+**What to look for:** NADAC **as of 2026-10-14**, one week newer than the 13 October run: **30,031** current NDCs,
+**922,487** price changes, **961,572** history rows, packed into a 14 MB file.
+
+#### 10.3 Deploy everything with one template
+
+![Cloud Shell: resource group, providers, model availability](docs/screenshots/45-cloudshell-rg-providers-model.png)
+
+**What to look for:** `rg-dpa` created in Central India, the five resource providers registered, and `gpt-4.1-mini`
+version `2025-04-14` still deployable on Global Standard. That is the same version the recorded evals used, so the
+baseline stays valid. Its *Legacy* status matches the retirement date in screenshot 28.
+
+![The Bicep deployment, complete](docs/screenshots/46-bicep-deployment-complete.png)
+
+**What to look for:** every resource *OK* or *Created*, including the two role assignments (the app's identity, and you
+for running evals from Cloud Shell) and the alert rule.
+
+![Deployment outputs](docs/screenshots/47-bicep-deployment-outputs.png)
+
+**What to look for:** `state Succeeded` after **3 min 9 s**, and the outputs: the app URL, the MCP URL, the model
+endpoint, the storage share. No key appears anywhere, because none exists.
+
+#### 10.4 Load the data and go live
+
+![Gold uploaded to Azure Files](docs/screenshots/48-gold-uploaded-to-azure-files.png)
+
+**What to look for:** the manifest (as of 2026-10-14, **381** NDCs in shortage), the three Parquet files in
+`dpa-data/gold`, and the restart. The CLI warning refers to the storage key being read into a shell variable; the
+key is never printed.
+
+![Live health check and MCP over HTTPS](docs/screenshots/49-live-healthz-and-mcp.png)
+
+**What to look for:** `synthetic_data: false` (the real snapshot is mounted), **401** without the token, and a real
+`tools/call` with it: generics in an FDA shortage ranked by 90-day increase.
+
+![The live Ask agent on real data](docs/screenshots/50-live-ask-agent-real-data.png)
+
+**What to look for:** a real answer through the app's managed identity (no API key): 1 tool call, 2 model calls,
+9.3 s, **$0.00155**. The trace shows the one parameterised tool call that produced every number.
+
+#### 10.5 What live traffic found, and how each fix shipped
+
+Two real-data bugs that the 38-question synthetic set could not catch:
+
+![Injection blocked; a search that missed](docs/screenshots/51-live-injection-blocked-and-search-miss.png)
+
+**What to look for:** the injection is blocked before any model call (**0 tokens, $0**). The verapamil question,
+though, found *no price history*. The trace showed why: `search_drugs` matched `"verapamil 120 mg tablets"` as one
+phrase, and CMS writes `VERAPAMIL ER 120 MG TABLET`. **Fix 1:** every word must match, with plurals folded. The
+golden-set tool results did not change, so the recorded replay still passed, and the fix shipped as a new revision:
+
+![Rolling out a new revision](docs/screenshots/52-rollout-new-revision.png)
+
+**What to look for:** the new image takes **100%** of traffic; the old revision stays available for a one-command rollback.
+
+![Search fixed, but the date is wrong](docs/screenshots/53-live-search-fixed.png)
+
+**What to look for:** the drug is found and its history fetched (34 versions). But the answer says the price last
+changed on **2026-01-21**, while the data says **2026-09-23**. Number grounding passed, because 2026-01-21 really is in
+the tool result. Grounding proves a value came from a tool, not that it is the *right* value; that is the job of the
+eval set. **Root cause:** the history came oldest first and long results are cut to 25 rows, so the model never saw
+the last nine versions; even with the tail kept, it still misread a long oldest-first list. **Fix 2:** `price_history`
+returns newest first. That changes tool output for the golden history questions, so the cassette had to be
+re-recorded with a live run, which is the gate doing its job. A new fixture drug with **35 price versions** and a
+new critical question, `hist-06`, keep this bug from coming back.
+
+![App Insights: one row per question](docs/screenshots/54-app-insights-agent-traces.png)
+
+**What to look for:** the monitoring layer that the October run did not have. Each question is one trace with
+status, prompt version, tools, tokens, cost and ungrounded-number count. The blocked injection shows **0 tokens and $0**.
+
+#### 10.6 Re-record the evals from CI, keylessly
+
+![The OIDC identity: no secrets, one permission](docs/screenshots/55-oidc-identity-no-secrets.png)
+
+**What to look for:** `gh-dpa-eval-live` has **0** passwords and **0** certificates. It has a single federated
+credential, accepted only for this repository's `azure-openai` GitHub environment, and a single role: *Cognitive
+Services OpenAI User* on the one model account. The first sign-in failed with `AADSTS700213`, because GitHub now
+puts immutable owner and repository IDs in the subject (`repo:owner@id/repo@id:environment:…`). The credential was
+updated to match.
+
+![Model deployment: 30K TPM, NoAutoUpgrade](docs/screenshots/56-model-deployment-30k-noautoupgrade.png)
+
+**What to look for:** **NoAutoUpgrade**, the gap from Step 7, now closed by the template. The first two live runs hit
+**429** rate limits (21 of 39 questions, then 1 of 39). Azure counts each request's maximum output allowance against
+the tokens-per-minute cap, so parallel questions burst past it even though each uses about 2.4K tokens. The cap went
+from 10K to 30K, and the live eval now runs one question at a time.
+
+![eval-live: keyless, gated, promoted](docs/screenshots/57-eval-live-keyless-promoted.png)
+
+**What to look for:** sign-in with OIDC, the live eval (2 min 5 s), the gate, a **replay of the new cassette** (proving
+CI will reproduce the run exactly), then *Promote*, which commits the cassette and the new baseline.
+Result: **39/39 correct**, 100% grounded, 100% refusals and injection blocks, p95 7.4 s, **$0.00078 per answer**,
+$0.03 for the whole run.
+
+![The live answer after the fix](docs/screenshots/58-live-history-correct-date.png)
+
+**What to look for:** last change **2026-09-23**, current price **$0.08873**, previous **$0.08713**. All three match the
+real snapshot, checked independently with SQL.
+
+#### 10.7 Run it yourself
+
+```bash
+# Real Gold: run the data-refresh workflow (Actions tab), or download the release
+curl -LO https://github.com/sujithnsn2026-crypto/drug-pricing-agent/releases/download/data-latest/gold-snapshot.tar.gz
+
+# Deploy (Azure Cloud Shell, in a clone of this repo)
+az group create -n rg-dpa -l centralindia
+az deployment group create -g rg-dpa -f infra/main.bicep \
+  -p image=ghcr.io/sujithnsn2026-crypto/drug-pricing-agent:<tag> \
+     deployerPrincipalId=$(az ad signed-in-user show --query id -o tsv) \
+     mcpToken=$(openssl rand -hex 24) adminToken=$(openssl rand -hex 24) alertEmail=<you>
+# then upload gold/ to the dpa-data share and restart the revision (commands in screenshot 48)
+
+# Ship a new image
+az containerapp update -g rg-dpa -n ca-dpa-web --image ghcr.io/sujithnsn2026-crypto/drug-pricing-agent:<tag>
+
+# Read the tokens (reviewer token for Price-Watch, bearer token for /mcp)
+az containerapp secret show -g rg-dpa -n ca-dpa-web --secret-name admin-token --query value -o tsv
+```
+
+**Cost when idle:** the app scales to zero and Azure OpenAI bills per token, so idle cost is storage (a few MB) and
+log ingestion, well under ₹100 a month. Every redeploy must pass the current image tag, or the template will roll
+the app back to whatever tag you give it.
+
 ### Results at a glance
 
 | Area | Result |
@@ -468,7 +651,9 @@ link and embedding (defined in `src/dpa/ai/labels.py`).
 | Model usage | 513 requests · 430.34K tokens to `gpt-4.1-mini` in the week of the run (6–13 Oct 2026) |
 | Azure | 3 services in `rg-dpa` · ₹2,000/month budget · AI Search on the Free tier |
 | SQL proof | 8 read-only queries confirm every count; all error-level data checks pass; 289 rows flagged as a warning |
-| CI | Replayed eval gate on every push: all thresholds, 7 critical questions, no regression vs baseline |
+| CI | Replayed eval gate on every push: all thresholds, 8 critical questions, no regression vs baseline |
+| Live (Step 10) | Public app + `/mcp` on Container Apps, scales to zero · no API keys anywhere · NADAC as of 2026-10-14 |
+| Live evals | Keyless `eval-live` (GitHub OIDC): **39/39** · p95 7.4 s · **$0.00078 per answer** · 2 real-data bugs found live and fixed under the gate |
 
 ### Design principle for the agents
 
@@ -529,35 +714,22 @@ dpa-eval compare evals/runs/<v1> evals/runs/<v2> # ...and see what it fixed and 
 dpa-eval promote evals/runs/<v2>                # make it the new baseline
 ```
 
-### Deploy the LLMOps infrastructure (not used in the first run)
+### Deploy the hosted stack and keyless evals
 
-The first real-data run created its Azure services by hand (Step 9 shows them); Application Insights and Log
-Analytics were not part of `rg-dpa`, so traces could only be written to the local JSONL files. These steps deploy the full monitoring layer.
+Step 10 walks through this with a screenshot per step. In short:
 
-1. **Pick a model your region offers.** Azure portal → Azure AI Foundry → Model catalog. Note the model name,
-   version and deployment type (e.g. `gpt-4.1-mini`, `2025-04-14`, Global Standard). Set its price in
+1. **Pick a model your region offers** (Azure AI Foundry model catalog), set its price in
    `config/model_prices.yaml` and its deployment name in `evals/ci.yaml`.
-2. **Create the resources** in `rg-dpa` (Log Analytics with a 1 GB/day cap, App Insights, Azure OpenAI, one
-   pinned deployment capped at 30K tokens/min, optional alert):
-   ```bash
-   az deployment group create -g rg-dpa -f infra/main.bicep \
-     -p openAiLocation=<region> modelName=<model> modelVersion=<version> deploymentName=<model> alertEmail=<you>
-   ```
-   Or in the portal: **Deploy a custom template** → **Build your own template** → paste `infra/main.json`.
-   Azure OpenAI bills per token (one full eval run is cents); there is no idle cost.
-3. **Local secrets:** copy `.env.example` to `.env` and fill in the endpoint, key (Azure OpenAI → Keys and
-   Endpoint) and the App Insights connection string.
-4. **First live run, then commit the recording:**
-   ```bash
-   dpa-eval run --mode record --out evals/runs/first
-   dpa-eval gate evals/runs/first --no-baseline
-   dpa-eval promote evals/runs/first
-   git add evals/cassettes evals/baseline && git commit -m "First recorded eval baseline"
-   ```
-   From then on CI replays this cassette and gates every push.
-5. **GitHub Actions:** Settings → Environments → create `azure-openai` with secrets `AZURE_OPENAI_ENDPOINT`,
-   `AZURE_OPENAI_API_KEY`, `APPLICATIONINSIGHTS_CONNECTION_STRING`. Then run the `eval-live` workflow.
-   (Upgrade later: OIDC federated credentials instead of a stored key.)
+2. **Deploy `infra/main.bicep`** into `rg-dpa` (command in Step 10.7). It creates monitoring, storage, Azure OpenAI
+   with keys disabled, the Container App with a managed identity, the budget and the alert.
+3. **Load Gold** from the `data-latest` release into the `dpa-data` share and restart the revision.
+4. **Local runs:** `az login`, then set `AZURE_OPENAI_ENDPOINT` (no key: the client uses your Entra sign-in, and the
+   template grants you *Cognitive Services OpenAI User* when you pass `deployerPrincipalId`).
+5. **Keyless CI evals:** create an app registration with **no secret**, add a federated credential whose subject is
+   your repository's `azure-openai` environment (GitHub may send `repo:owner@<id>/repo@<id>:environment:azure-openai`;
+   copy the exact subject from a failed login), give it *Cognitive Services OpenAI User* on the model account, and set
+   the repository variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `AZURE_OPENAI_ENDPOINT`.
+   Then run `eval-live` with **promote**: it records, gates, replays and commits the cassette and the baseline.
 6. **Dashboards:** App Insights → Logs → paste the queries in `ops/kql/` and pin them.
 
 ### LLMOps decisions worth explaining
