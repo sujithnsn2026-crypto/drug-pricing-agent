@@ -101,3 +101,9 @@ def test_review_page_never_puts_token_in_url(web, tmp_path):
     page = c.get("/review").text
     assert "type=password" in page and "X-Admin-Token':TOKEN" in page and "location.search" not in page
     assert "class=rev hidden" in page  # buttons hidden until a token is entered; the server still checks it
+
+
+def test_review_page_explains_when_no_run_is_published(web):
+    _, c = web
+    page = c.get("/review").text
+    assert "No Price-Watch run has been published" in page and "README Step 6" in page

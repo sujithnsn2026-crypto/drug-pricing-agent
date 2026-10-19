@@ -208,7 +208,14 @@ def review_page() -> str:
     # a URL (URLs end up in browser history, proxy logs and screenshots). The server checks it.
     run = _latest_run()
     if not run:
-        return f"<!doctype html><meta charset=utf-8>{STYLE}<div class=wrap>{NAV}<h1>No Price-Watch runs yet</h1></div>"
+        return (f"<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+                f"<title>Price-Watch review</title>{STYLE}<div class=wrap>{NAV}<h1>Price-Watch review</h1>"
+                "<p class=sub>No Price-Watch run has been published to this deployment yet. Price-Watch runs from the "
+                "command line (<code>dpa-pricewatch run</code>): SQL finds unusual price moves, one agent per move "
+                "looks for the cause, code re-checks every number, and a reviewer approves findings here.</p>"
+                f"<p>The first run on real data (6 signals, 6/6 verified by code, $0.0146) is documented with "
+                f"screenshots in <a href=\"{REPO_URL}#step-6-price-watch-detect-in-sql-explain-with-agents-verify-in-code\">"
+                f"README Step 6</a>.</p>{_footer()}</div>")
     d = json.load(open(os.path.join(run, "findings.json")))
     e = html.escape
     cards = []

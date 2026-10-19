@@ -842,6 +842,12 @@ These are the parts worth explaining in an interview.
 - Delta MERGE is exercised on Databricks only; locally the same staged rows are applied by
   `apply_staged_local`, which the equality test covers.
 - Shortages are matched to prices by exact NDC. Matching by ingredient (via RxNorm) would catch more.
+- **Open (19 Oct 2026): Price-Watch stalls on the keyless Step 10 deployment.** Run from Cloud Shell with Entra
+  sign-in, the first investigator finished in 6 s and the other three never returned (trace: no further model or tool
+  spans, processes idle). Suspects: concurrent Entra token fetches through the Azure CLI credential, or parallel
+  tool calls over the single shared MCP stdio session. Next step: run with one investigator, then add a per-call
+  timeout and a span around token acquisition. Until then the live review page explains this and links to the
+  verified October run (Step 6).
 
 ## Data sources and terms
 
