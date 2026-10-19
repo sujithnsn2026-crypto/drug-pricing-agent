@@ -45,6 +45,8 @@ jobs:
     environment: azure-openai
     env:
       AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      # One question at a time: Azure counts each request's max output allowance against the TPM cap,
+      # so parallel questions burst past 30K/min even though they use ~2.4K tokens each.
       DPA_LLM_MAX_RETRIES: "8"   # back off on 429s (the client honours Retry-After)
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +72,7 @@ jobs:
           CASSETTE="evals/cassettes/${MODEL}__ask_agent-${VERSION}.jsonl"
           rm -f "$CASSETTE"   # a fresh recording, so no stale entries survive
           echo "cassette=$CASSETTE" >> "$GITHUB_OUTPUT"
-          dpa-eval run --mode record --model "$MODEL" --prompt-version "$VERSION" --out evals/runs/live --concurrency 2
+          dpa-eval run --mode record --model "$MODEL" --prompt-version "$VERSION" --out evals/runs/live --concurrency 1
       - name: Gate
         run: dpa-eval gate evals/runs/live
       - name: Replay the new cassette (proves CI will reproduce this run exactly)
