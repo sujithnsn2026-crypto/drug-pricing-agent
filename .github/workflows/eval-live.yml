@@ -23,13 +23,12 @@ on:
         description: If the gate passes, commit the new cassette and make it the baseline
         type: boolean
         default: false
-  schedule:
-    - cron: "30 3 * * 1"  # Mondays 03:30 UTC (09:00 IST)
-  pull_request:
-    paths:
-      - "prompts/**"
-      - "src/dpa/agent/**"
-      - "src/dpa/llmops/**"
+  # The weekly schedule and the prompt/agent PR trigger are off while no Azure deployment exists
+  # (rg-dpa was deleted on 20 Oct 2026 to stop charges). Restore them after redeploying (README 10.7):
+  # schedule:
+  #   - cron: "30 3 * * 1"  # Mondays 03:30 UTC (09:00 IST)
+  # pull_request:
+  #   paths: ["prompts/**", "src/dpa/agent/**", "src/dpa/llmops/**"]
 
 permissions:
   contents: write   # only used by the promote step

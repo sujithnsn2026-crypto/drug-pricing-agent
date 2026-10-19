@@ -57,7 +57,7 @@ the MCP tool server and the Price-Watch workflow. See
 | 4b | Move the Ask agent onto Azure AI Foundry Agent Service using the MCP tools | |
 | 5 | Price-Watch workflow: SQL signal finder, parallel investigators, code verifier, human approval | ✅ done (first real run: 6/6 verified) |
 | 6b | Calibrated LLM judge for free-text quality, trajectory evals, online feedback loop | |
-| 7 | Hosting: UI + agent + MCP on Container Apps from one Bicep template, keyless (managed identity + OIDC), App Insights, weekly data refresh | ✅ live ([Step 10](#step-10-host-it-live-keyless-and-fix-what-live-traffic-found-19-october-2026)) |
+| 7 | Hosting: UI + agent + MCP on Container Apps from one Bicep template, keyless (managed identity + OIDC), App Insights, weekly data refresh | ✅ done, ran live 19–20 Oct 2026, then taken down to stop charges ([Step 10](#step-10-host-it-live-keyless-and-fix-what-live-traffic-found-19-october-2026)) |
 
 ## How this was built and what the first real-data run showed
 
@@ -459,9 +459,13 @@ link and embedding (defined in `src/dpa/ai/labels.py`).
 
 ### Step 10. Host it live, keyless, and fix what live traffic found (19 October 2026)
 
-**Live app:** <https://ca-dpa-web.blackocean-cc3b3637.centralindia.azurecontainerapps.io> · the MCP endpoint is
-`/mcp` on the same host (bearer token). The app scales to zero, so the first visit after a quiet spell takes a few
-seconds to wake it.
+> **Taken down on 20 October 2026.** `rg-dpa` was deleted to stop Azure charges, so the live app at
+> `ca-dpa-web.blackocean-cc3b3637.centralindia.azurecontainerapps.io` no longer answers. The screenshots below are
+> the record of it running. Everything is reproducible: the Gold data is in the `data-latest` release, and one
+> Bicep deployment rebuilds the stack (10.7). The `eval-live` schedule is paused until then.
+
+**While it ran:** the app was public, and the MCP endpoint was `/mcp` on the same host (bearer token). It scaled to
+zero, so the first visit after a quiet spell took a few seconds to wake it.
 
 After the Step 9 clean-up nothing was running. This step puts the Ask agent, the Price-Watch review page and the
 MCP tool server online from code, and closes the gaps Steps 7 and 9 listed: a model that could auto-upgrade,
@@ -710,7 +714,7 @@ the app back to whatever tag you give it.
 | Azure | 3 services in `rg-dpa` · ₹2,000/month budget · AI Search on the Free tier |
 | SQL proof | 8 read-only queries confirm every count; all error-level data checks pass; 289 rows flagged as a warning |
 | CI | Replayed eval gate on every push: all thresholds, 8 critical questions, no regression vs baseline |
-| Live (Step 10) | Public app + `/mcp` on Container Apps, scales to zero · no API keys anywhere · NADAC as of 2026-10-14 |
+| Live (Step 10) | Public app + `/mcp` on Container Apps, scaled to zero · no API keys anywhere · NADAC as of 2026-10-14 · taken down 20 Oct 2026 |
 | Price-Watch, live (Step 10.8) | 4 signals · **4/4 verified by code** · **$0.0094 per run** · 3 approved, 1 rejected by the reviewer · brief published |
 | Live evals | Keyless `eval-live` (GitHub OIDC): **39/39** · p95 7.4 s · **$0.00078 per answer** · 2 real-data bugs found live and fixed under the gate |
 
