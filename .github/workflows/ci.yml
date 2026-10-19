@@ -30,9 +30,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[agent]" pytest
+      - run: pip install -e ".[agent]" pytest httpx
       - name: Unit tests (guardrails, tools, agent loop, eval scoring, gate, MCP server, Price-Watch)
-        run: pytest -q tests/test_agent_guards.py tests/test_agent_loop.py tests/test_evals.py tests/test_mcp_pricewatch.py
+        run: pytest -q tests/test_agent_guards.py tests/test_agent_loop.py tests/test_evals.py tests/test_mcp_pricewatch.py tests/test_hosting.py
       - name: Replay the golden set from the recorded cassette and gate it
         # Free and deterministic: no model calls. If a prompt, tool or the fixture changed,
         # the cassette misses and this fails with "re-record", which is what you want.

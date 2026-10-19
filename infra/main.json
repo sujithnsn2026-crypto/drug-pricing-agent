@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.48.1.52935",
-      "templateHash": "12151674074259915671"
+      "templateHash": "699124557119015604"
     }
   },
   "parameters": {
@@ -20,21 +20,27 @@
       "type": "string",
       "defaultValue": "[resourceGroup().location]",
       "metadata": {
-        "description": "Region for monitoring resources"
+        "description": "Region for everything except the model account"
       }
     },
     "openAiLocation": {
       "type": "string",
-      "defaultValue": "[parameters('location')]",
+      "defaultValue": "eastus2",
       "metadata": {
         "description": "Region for the Azure OpenAI account (model availability differs by region)"
+      }
+    },
+    "image": {
+      "type": "string",
+      "metadata": {
+        "description": "Container image for the app, e.g. ghcr.io/owner/drug-pricing-agent:sha-abc1234"
       }
     },
     "modelName": {
       "type": "string",
       "defaultValue": "gpt-4.1-mini",
       "metadata": {
-        "description": "Model to deploy, and its version (check the portal model catalog for what your region offers)"
+        "description": "Model to deploy and its version (check the portal model catalog for what your region offers)"
       }
     },
     "modelVersion": {
@@ -45,7 +51,7 @@
       "type": "string",
       "defaultValue": "gpt-4.1-mini",
       "metadata": {
-        "description": "Deployment name the agent passes as --model"
+        "description": "Deployment name the agent calls (DPA_MODEL)"
       }
     },
     "deploymentSku": {
@@ -59,32 +65,72 @@
     },
     "capacityKTpm": {
       "type": "int",
-      "defaultValue": 30,
+      "defaultValue": 10,
       "metadata": {
-        "description": "Throughput limit in thousands of tokens per minute (TPM). Small on purpose: caps runaway spend."
+        "description": "Throughput cap in thousands of tokens per minute. Low on purpose: it bounds the worst-case bill."
       }
     },
-    "logDailyCapGb": {
-      "type": "int",
-      "defaultValue": 1,
+    "deployerPrincipalId": {
+      "type": "string",
+      "defaultValue": "",
       "metadata": {
-        "description": "Daily ingestion cap for Log Analytics, in GB"
+        "description": "Object ID of the person deploying (az ad signed-in-user show --query id -o tsv), so evals and Price-Watch can run from Cloud Shell without keys. Empty = skip."
+      }
+    },
+    "mcpToken": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Bearer token for /mcp"
+      }
+    },
+    "adminToken": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Token a reviewer needs to approve or reject Price-Watch findings"
+      }
+    },
+    "dailyQuestionLimit": {
+      "type": "int",
+      "defaultValue": 200,
+      "metadata": {
+        "description": "Questions per UTC day across all visitors (caps the model bill)"
       }
     },
     "alertEmail": {
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Email for the grounding alert (leave empty to skip the alert)"
+        "description": "Email for the budget and the grounding alert (empty = skip both)"
       }
+    },
+    "budgetAmount": {
+      "type": "int",
+      "defaultValue": 2000,
+      "metadata": {
+        "description": "Monthly budget for the resource group, in the billing currency"
+      }
+    },
+    "budgetStartDate": {
+      "type": "string",
+      "defaultValue": "[format('{0}-01', utcNow('yyyy-MM'))]",
+      "metadata": {
+        "description": "First day of the budget period (yyyy-MM-01)"
+      }
+    },
+    "logDailyCapGb": {
+      "type": "int",
+      "defaultValue": 1
     }
   },
   "variables": {
     "suffix": "[uniqueString(resourceGroup().id)]",
     "tags": {
       "project": "drug-pricing-agent",
-      "component": "llmops"
-    }
+      "component": "serving"
+    },
+    "appName": "[format('ca-{0}-web', parameters('namePrefix'))]",
+    "shareName": "dpa-data",
+    "openAiUserRole": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
   },
   "resources": [
     {
@@ -121,6 +167,41 @@
       ]
     },
     {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[format('st{0}{1}', parameters('namePrefix'), variables('suffix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}', format('st{0}{1}', parameters('namePrefix'), variables('suffix')), 'default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', format('st{0}{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}/{2}', format('st{0}{1}', parameters('namePrefix'), variables('suffix')), 'default', variables('shareName'))]",
+      "properties": {
+        "shareQuota": 5
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', format('st{0}{1}', parameters('namePrefix'), variables('suffix')), 'default')]"
+      ]
+    },
+    {
       "type": "Microsoft.CognitiveServices/accounts",
       "apiVersion": "2024-10-01",
       "name": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
@@ -133,7 +214,7 @@
       "properties": {
         "customSubDomainName": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
         "publicNetworkAccess": "Enabled",
-        "disableLocalAuth": false
+        "disableLocalAuth": true
       }
     },
     {
@@ -155,6 +236,251 @@
       "dependsOn": [
         "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
       ]
+    },
+    {
+      "condition": "[not(empty(parameters('deployerPrincipalId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))), parameters('deployerPrincipalId'), variables('openAiUserRole'))]",
+      "properties": {
+        "principalId": "[parameters('deployerPrincipalId')]",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('openAiUserRole'))]",
+        "principalType": "User"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', format('log-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', format('log-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2023-09-01').primarySharedKey]"
+          }
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-{0}-{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix')), 'dpadata')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[format('st{0}{1}', parameters('namePrefix'), variables('suffix'))]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', format('st{0}{1}', parameters('namePrefix'), variables('suffix'))), '2023-05-01').keys[0].value]",
+          "shareName": "[variables('shareName')]",
+          "accessMode": "ReadWrite"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', format('st{0}{1}', parameters('namePrefix'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('appName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "auto",
+            "allowInsecure": false
+          },
+          "secrets": [
+            {
+              "name": "appi-conn",
+              "value": "[reference(resourceId('Microsoft.Insights/components', format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2020-02-02').ConnectionString]"
+            },
+            {
+              "name": "mcp-token",
+              "value": "[parameters('mcpToken')]"
+            },
+            {
+              "name": "admin-token",
+              "value": "[parameters('adminToken')]"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "web",
+              "image": "[parameters('image')]",
+              "resources": {
+                "cpu": "[json('1.0')]",
+                "memory": "2Gi"
+              },
+              "env": [
+                {
+                  "name": "AZURE_OPENAI_ENDPOINT",
+                  "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2024-10-01').endpoint]"
+                },
+                {
+                  "name": "DPA_MODEL",
+                  "value": "[parameters('deploymentName')]"
+                },
+                {
+                  "name": "DPA_GOLD_DIR",
+                  "value": "/data/gold"
+                },
+                {
+                  "name": "DPA_PRICEWATCH_DIR",
+                  "value": "/data/pricewatch_runs"
+                },
+                {
+                  "name": "DPA_MCP_ALLOWED_HOSTS",
+                  "value": "[format('{0}.{1}', variables('appName'), reference(resourceId('Microsoft.App/managedEnvironments', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2024-03-01').defaultDomain)]"
+                },
+                {
+                  "name": "DPA_DAILY_QUESTION_LIMIT",
+                  "value": "[string(parameters('dailyQuestionLimit'))]"
+                },
+                {
+                  "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                  "secretRef": "appi-conn"
+                },
+                {
+                  "name": "DPA_MCP_TOKEN",
+                  "secretRef": "mcp-token"
+                },
+                {
+                  "name": "DPA_ADMIN_TOKEN",
+                  "secretRef": "admin-token"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "volumeName": "data",
+                  "mountPath": "/data"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Startup",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8080
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 36
+                },
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8080
+                  },
+                  "periodSeconds": 30
+                }
+              ]
+            }
+          ],
+          "volumes": [
+            {
+              "name": "data",
+              "storageType": "AzureFile",
+              "storageName": "dpadata"
+            }
+          ],
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": 1,
+            "rules": [
+              {
+                "name": "http",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "20"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "[resourceId('Microsoft.Insights/components', format('appi-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')), parameters('deploymentName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', format('cae-{0}-{1}', parameters('namePrefix'), variables('suffix')), 'dpadata')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))), resourceId('Microsoft.App/containerApps', variables('appName')), variables('openAiUserRole'))]",
+      "properties": {
+        "principalId": "[reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full').identity.principalId]",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('openAiUserRole'))]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix')))]",
+        "[resourceId('Microsoft.App/containerApps', variables('appName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('alertEmail')))]",
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}-monthly-{1}', parameters('namePrefix'), parameters('budgetAmount'))]",
+      "properties": {
+        "category": "Cost",
+        "amount": "[parameters('budgetAmount')]",
+        "timeGrain": "Monthly",
+        "timePeriod": {
+          "startDate": "[parameters('budgetStartDate')]"
+        },
+        "notifications": {
+          "actual80": {
+            "enabled": true,
+            "operator": "GreaterThan",
+            "threshold": 80,
+            "thresholdType": "Actual",
+            "contactEmails": [
+              "[parameters('alertEmail')]"
+            ]
+          },
+          "forecast100": {
+            "enabled": true,
+            "operator": "GreaterThan",
+            "threshold": 100,
+            "thresholdType": "Forecasted",
+            "contactEmails": [
+              "[parameters('alertEmail')]"
+            ]
+          }
+        }
+      }
     },
     {
       "condition": "[not(empty(parameters('alertEmail')))]",
@@ -218,17 +544,25 @@
     }
   ],
   "outputs": {
+    "appUrl": {
+      "type": "string",
+      "value": "[format('https://{0}', reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01').configuration.ingress.fqdn)]"
+    },
+    "mcpUrl": {
+      "type": "string",
+      "value": "[format('https://{0}/mcp', reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01').configuration.ingress.fqdn)]"
+    },
     "openAiEndpoint": {
       "type": "string",
       "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))), '2024-10-01').endpoint]"
     },
-    "openAiAccountName": {
+    "storageAccountName": {
       "type": "string",
-      "value": "[format('aoai-{0}-{1}', parameters('namePrefix'), variables('suffix'))]"
+      "value": "[format('st{0}{1}', parameters('namePrefix'), variables('suffix'))]"
     },
-    "deploymentName": {
+    "shareName": {
       "type": "string",
-      "value": "[parameters('deploymentName')]"
+      "value": "[variables('shareName')]"
     },
     "appInsightsName": {
       "type": "string",

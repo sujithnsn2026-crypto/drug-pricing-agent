@@ -1,47 +1,76 @@
-// LLMOps infrastructure for the Ask agent, deployed into the existing resource group (rg-dpa).
+// Phase 7: the hosted Drug Pricing Agent, one template for the whole serving stack in rg-dpa.
 //
-//   Log Analytics workspace  <- Application Insights (workspace-based): traces, KQL, alerts
-//   Azure OpenAI account     -> one model deployment the agent calls
-//   Scheduled log alert      -> fires when answers with ungrounded numbers exceed 5% in an hour
+//   Log Analytics (1 GB/day cap) <- Application Insights      traces, KQL, alert
+//   Storage account -> Azure Files share "dpa-data"            Gold snapshot + Price-Watch runs
+//   Azure OpenAI -> gpt-4.1-mini deployment                    pinned version, NoAutoUpgrade, capped TPM
+//   Container Apps environment -> container app "ca-dpa-web"   UI + Ask agent + MCP at /mcp, scales to zero
+//   Managed identity on the app -> "Cognitive Services OpenAI User" on the model account (no API keys)
+//   Budget on the resource group (optional, needs alertEmail)
 //
-// Deploy:
-//   az deployment group create -g rg-dpa -f infra/main.bicep -p alertEmail=you@example.com
-// (or compile with `bicep build` and use "Deploy a custom template" in the portal: infra/main.json)
+// Deploy from Azure Cloud Shell:
+//   az deployment group create -g rg-dpa -f infra/main.bicep \
+//     -p image=ghcr.io/<owner>/drug-pricing-agent:<tag> deployerPrincipalId=$(az ad signed-in-user show --query id -o tsv) \
+//        mcpToken=<random> adminToken=<random> alertEmail=<you>
 //
-// Cost notes: Log Analytics and App Insights bill per GB ingested (a daily cap is set below);
-// Azure OpenAI Standard/GlobalStandard bills per token only, with no idle cost.
+// Idle cost: the app scales to zero; Azure OpenAI bills per token; storage and logs are a few MB.
 
 @description('Short prefix for resource names')
 param namePrefix string = 'dpa'
 
-@description('Region for monitoring resources')
+@description('Region for everything except the model account')
 param location string = resourceGroup().location
 
 @description('Region for the Azure OpenAI account (model availability differs by region)')
-param openAiLocation string = location
+param openAiLocation string = 'eastus2'
 
-@description('Model to deploy, and its version (check the portal model catalog for what your region offers)')
+@description('Container image for the app, e.g. ghcr.io/owner/drug-pricing-agent:sha-abc1234')
+param image string
+
+@description('Model to deploy and its version (check the portal model catalog for what your region offers)')
 param modelName string = 'gpt-4.1-mini'
 param modelVersion string = '2025-04-14'
 
-@description('Deployment name the agent passes as --model')
+@description('Deployment name the agent calls (DPA_MODEL)')
 param deploymentName string = 'gpt-4.1-mini'
 
 @allowed(['GlobalStandard', 'DataZoneStandard', 'Standard'])
 param deploymentSku string = 'GlobalStandard'
 
-@description('Throughput limit in thousands of tokens per minute (TPM). Small on purpose: caps runaway spend.')
-param capacityKTpm int = 30
+@description('Throughput cap in thousands of tokens per minute. Low on purpose: it bounds the worst-case bill.')
+param capacityKTpm int = 10
 
-@description('Daily ingestion cap for Log Analytics, in GB')
-param logDailyCapGb int = 1
+@description('Object ID of the person deploying (az ad signed-in-user show --query id -o tsv), so evals and Price-Watch can run from Cloud Shell without keys. Empty = skip.')
+param deployerPrincipalId string = ''
 
-@description('Email for the grounding alert (leave empty to skip the alert)')
+@secure()
+@description('Bearer token for /mcp')
+param mcpToken string
+
+@secure()
+@description('Token a reviewer needs to approve or reject Price-Watch findings')
+param adminToken string
+
+@description('Questions per UTC day across all visitors (caps the model bill)')
+param dailyQuestionLimit int = 200
+
+@description('Email for the budget and the grounding alert (empty = skip both)')
 param alertEmail string = ''
 
-var suffix = uniqueString(resourceGroup().id)
-var tags = { project: 'drug-pricing-agent', component: 'llmops' }
+@description('Monthly budget for the resource group, in the billing currency')
+param budgetAmount int = 2000
 
+@description('First day of the budget period (yyyy-MM-01)')
+param budgetStartDate string = '${utcNow('yyyy-MM')}-01'
+
+param logDailyCapGb int = 1
+
+var suffix = uniqueString(resourceGroup().id)
+var tags = { project: 'drug-pricing-agent', component: 'serving' }
+var appName = 'ca-${namePrefix}-web'
+var shareName = 'dpa-data'
+var openAiUserRole = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd' // Cognitive Services OpenAI User
+
+// ------------------------------------------------------------------ monitoring
 resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: 'log-${namePrefix}-${suffix}'
   location: location
@@ -66,6 +95,32 @@ resource appi 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
+// ------------------------------------------------------------------ data share
+resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: 'st${namePrefix}${suffix}'
+  location: location
+  tags: tags
+  sku: { name: 'Standard_LRS' }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+resource files 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
+  parent: storage
+  name: 'default'
+}
+
+resource share 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+  parent: files
+  name: shareName
+  properties: { shareQuota: 5 }
+}
+
+// ------------------------------------------------------------------ model
 resource aoai 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   name: 'aoai-${namePrefix}-${suffix}'
   location: openAiLocation
@@ -75,9 +130,7 @@ resource aoai 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   properties: {
     customSubDomainName: 'aoai-${namePrefix}-${suffix}'
     publicNetworkAccess: 'Enabled'
-    // Keys stay enabled so the CLI and GitHub Actions work with a secret. For production, set
-    // disableLocalAuth: true and use a managed identity (the client supports Entra ID already).
-    disableLocalAuth: false
+    disableLocalAuth: true // no API keys exist: callers use Microsoft Entra ID (managed identity / az login)
   }
 }
 
@@ -87,7 +140,128 @@ resource deployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01
   sku: { name: deploymentSku, capacity: capacityKTpm }
   properties: {
     model: { format: 'OpenAI', name: modelName, version: modelVersion }
-    versionUpgradeOption: 'NoAutoUpgrade' // a silent model upgrade would invalidate eval baselines
+    versionUpgradeOption: 'NoAutoUpgrade' // a silent model upgrade would invalidate the eval baseline
+  }
+}
+
+resource deployerCanCallModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployerPrincipalId)) {
+  name: guid(aoai.id, deployerPrincipalId, openAiUserRole)
+  scope: aoai
+  properties: {
+    principalId: deployerPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openAiUserRole)
+    principalType: 'User'
+  }
+}
+
+// ------------------------------------------------------------------ hosting
+resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: 'cae-${namePrefix}-${suffix}'
+  location: location
+  tags: tags
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: law.properties.customerId
+        sharedKey: law.listKeys().primarySharedKey
+      }
+    }
+    workloadProfiles: [ { name: 'Consumption', workloadProfileType: 'Consumption' } ]
+  }
+}
+
+resource envShare 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: env
+  name: 'dpadata'
+  properties: {
+    azureFile: {
+      accountName: storage.name
+      accountKey: storage.listKeys().keys[0].value
+      shareName: shareName
+      accessMode: 'ReadWrite' // the app writes Price-Watch review decisions
+    }
+  }
+}
+
+resource app 'Microsoft.App/containerApps@2024-03-01' = {
+  name: appName
+  location: location
+  tags: tags
+  identity: { type: 'SystemAssigned' }
+  dependsOn: [ deployment ]
+  properties: {
+    environmentId: env.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 8080
+        transport: 'auto'
+        allowInsecure: false
+      }
+      secrets: [
+        { name: 'appi-conn', value: appi.properties.ConnectionString }
+        { name: 'mcp-token', value: mcpToken }
+        { name: 'admin-token', value: adminToken }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'web'
+          image: image
+          resources: { cpu: json('1.0'), memory: '2Gi' }
+          env: [
+            { name: 'AZURE_OPENAI_ENDPOINT', value: aoai.properties.endpoint }
+            { name: 'DPA_MODEL', value: deploymentName }
+            { name: 'DPA_GOLD_DIR', value: '/data/gold' }
+            { name: 'DPA_PRICEWATCH_DIR', value: '/data/pricewatch_runs' }
+            { name: 'DPA_MCP_ALLOWED_HOSTS', value: '${appName}.${env.properties.defaultDomain}' }
+            { name: 'DPA_DAILY_QUESTION_LIMIT', value: string(dailyQuestionLimit) }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appi-conn' }
+            { name: 'DPA_MCP_TOKEN', secretRef: 'mcp-token' }
+            { name: 'DPA_ADMIN_TOKEN', secretRef: 'admin-token' }
+          ]
+          volumeMounts: [ { volumeName: 'data', mountPath: '/data' } ]
+          probes: [
+            { type: 'Startup', httpGet: { path: '/healthz', port: 8080 }, periodSeconds: 5, failureThreshold: 36 }
+            { type: 'Liveness', httpGet: { path: '/healthz', port: 8080 }, periodSeconds: 30 }
+          ]
+        }
+      ]
+      volumes: [ { name: 'data', storageType: 'AzureFile', storageName: envShare.name } ]
+      scale: {
+        minReplicas: 0 // scale to zero when idle: no compute bill between visits
+        maxReplicas: 1 // the in-app question limits are exact with one replica
+        rules: [ { name: 'http', http: { metadata: { concurrentRequests: '20' } } } ]
+      }
+    }
+  }
+}
+
+resource appCanCallModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(aoai.id, app.id, openAiUserRole)
+  scope: aoai
+  properties: {
+    principalId: app.identity.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openAiUserRole)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ------------------------------------------------------------------ guardrails on spend and quality
+resource budget 'Microsoft.Consumption/budgets@2023-05-01' = if (!empty(alertEmail)) {
+  name: '${namePrefix}-monthly-${budgetAmount}'
+  properties: {
+    category: 'Cost'
+    amount: budgetAmount
+    timeGrain: 'Monthly'
+    timePeriod: { startDate: budgetStartDate }
+    notifications: {
+      actual80: { enabled: true, operator: 'GreaterThan', threshold: 80, thresholdType: 'Actual', contactEmails: [ alertEmail ] }
+      forecast100: { enabled: true, operator: 'GreaterThan', threshold: 100, thresholdType: 'Forecasted', contactEmails: [ alertEmail ] }
+    }
   }
 }
 
@@ -128,9 +302,9 @@ resource groundingAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-previ
   }
 }
 
+output appUrl string = 'https://${app.properties.configuration.ingress.fqdn}'
+output mcpUrl string = 'https://${app.properties.configuration.ingress.fqdn}/mcp'
 output openAiEndpoint string = aoai.properties.endpoint
-output openAiAccountName string = aoai.name
-output deploymentName string = deployment.name
+output storageAccountName string = storage.name
+output shareName string = shareName
 output appInsightsName string = appi.name
-// The connection string is not a secret-grade credential (it only allows sending telemetry),
-// but it is still better copied from the portal than printed into deployment history.

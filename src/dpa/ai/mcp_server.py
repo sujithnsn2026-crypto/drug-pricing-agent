@@ -5,7 +5,9 @@ gets exactly the tools the Ask agent uses, with the same JSON schemas, the same 
 the same locked-down DuckDB, plus FDA label search when it is configured.
 
     dpa-mcp                                   # stdio transport
+    dpa-mcp --transport http --port 8000      # streamable HTTP at /mcp (hosted: see dpa.ai.web)
     DPA_GOLD_DIR=/path/to/gold dpa-mcp        # point at a Gold snapshot (default: eval fixture)
+    DPA_MCP_TOKEN=...                         # require a bearer token on HTTP
 """
 from __future__ import annotations
 
@@ -25,8 +27,10 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotent
 _JSON_TYPES = {"string": str, "integer": int, "number": float, "boolean": bool}
 
 
-def build_registry(gold_dir: str | None = None, with_search: bool = True) -> dict[str, Tool]:
-    tools = build_tools(DuckDbGold(gold_dir or os.environ.get("DPA_GOLD_DIR") or DEFAULT_FIXTURE))
+def build_registry(gold_dir: str | None = None, with_search: bool = True, db: DuckDbGold | None = None
+                   ) -> dict[str, Tool]:
+    db = db or DuckDbGold(gold_dir or os.environ.get("DPA_GOLD_DIR") or DEFAULT_FIXTURE)
+    tools = build_tools(db)
     search = search_from_env() if with_search else None
     if search is not None:
         t = make_search_tool(search)
@@ -81,8 +85,63 @@ def build_server(tools: dict[str, Tool]) -> MCPServer:
     return server
 
 
+class BearerAuth:
+    """ASGI middleware: require `Authorization: Bearer <token>` on every request when a token is set.
+
+    The tools are read-only over public data, so the token isn't protecting secrets; it keeps
+    the endpoint from being an open, free compute target for bots."""
+
+    def __init__(self, app, token: str | None):
+        self.app, self.token = app, token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and self.token:
+            headers = dict(scope.get("headers") or [])
+            got = headers.get(b"authorization", b"").decode()
+            import hmac
+            if not hmac.compare_digest(got, f"Bearer {self.token}"):
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"www-authenticate", b"Bearer")]})
+                await send({"type": "http.response.body", "body": b'{"error":"missing or wrong bearer token"}'})
+                return
+        await self.app(scope, receive, send)
+
+
+def http_app(tools: dict[str, Tool]):
+    """Streamable-HTTP MCP app (stateless, JSON responses) for hosting behind HTTPS ingress.
+
+    Stateless mode keeps no per-client session in memory, so any replica can answer any
+    request and the app can scale to zero between calls. Returns (asgi_app, lifespan_owner):
+    the owner's lifespan must run, because it starts the MCP session manager.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = [h.strip() for h in os.environ.get("DPA_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    security = (TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts,
+                                          allowed_origins=[f"https://{h}" for h in hosts])
+                if hosts else TransportSecuritySettings(enable_dns_rebinding_protection=False))
+    inner = build_server(tools).streamable_http_app(
+        streamable_http_path="/mcp", stateless_http=True, json_response=True,
+        transport_security=security, host="0.0.0.0")
+    return BearerAuth(inner, os.environ.get("DPA_MCP_TOKEN") or None), inner
+
+
 def main() -> None:
-    build_server(build_registry()).run("stdio")
+    import argparse
+
+    p = argparse.ArgumentParser(prog="dpa-mcp")
+    p.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    p.add_argument("--port", type=int, default=8000)
+    a = p.parse_args()
+    tools = build_registry()
+    if a.transport == "stdio":
+        build_server(tools).run("stdio")
+        return
+    import uvicorn
+
+    app, _ = http_app(tools)
+    uvicorn.run(app, host="0.0.0.0", port=a.port)
 
 
 if __name__ == "__main__":
