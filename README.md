@@ -595,6 +595,13 @@ Services OpenAI User* on the one model account. The first sign-in failed with `A
 puts immutable owner and repository IDs in the subject (`repo:owner@id/repo@id:environment:…`). The credential was
 updated to match.
 
+![The first OIDC sign-in: subject mismatch](docs/screenshots/55b-oidc-subject-mismatch.png)
+
+**What to look for:** line 24, the *subject claim* GitHub actually sent, with numeric owner and repository IDs
+(`sujithnsn2026-crypto@334362249/drug-pricing-agent@1408251489`), and line 28, Entra's `AADSTS700213: No matching
+federated identity record`. The credential had been created with the older `repo:owner/repo:environment:…` form.
+Copying the exact subject from this log into the credential fixed it on the next attempt.
+
 ![Model deployment: 30K TPM, NoAutoUpgrade](docs/screenshots/56-model-deployment-30k-noautoupgrade.png)
 
 **What to look for:** **NoAutoUpgrade**, the gap from Step 7, now closed by the template. The first two live runs hit
@@ -602,12 +609,25 @@ updated to match.
 the tokens-per-minute cap, so parallel questions burst past it even though each uses about 2.4K tokens. The cap went
 from 10K to 30K, and the live eval now runs one question at a time.
 
+![The second live run: one question lost to a 429](docs/screenshots/56b-eval-live-429-rate-limit.png)
+
+**What to look for:** every category at 100% except *ranking* (85.7%), and the reason on line 60: `RateLimitError:
+Error code: 429 … exceeded token rate limit` on `rank-07`. Because of the error-reason change, the report names the
+cause instead of a bare *status=error*. An infrastructure error still fails the run, so nothing gets promoted from an
+incomplete recording.
+
 ![eval-live: keyless, gated, promoted](docs/screenshots/57-eval-live-keyless-promoted.png)
 
 **What to look for:** sign-in with OIDC, the live eval (2 min 5 s), the gate, a **replay of the new cassette** (proving
 CI will reproduce the run exactly), then *Promote*, which commits the cassette and the new baseline.
 Result: **39/39 correct**, 100% grounded, 100% refusals and injection blocks, p95 7.4 s, **$0.00078 per answer**,
 $0.03 for the whole run.
+
+![CI on main: the gate passes with the new recording](docs/screenshots/57b-ci-main-gate-passed-hist06.png)
+
+**What to look for:** after the merge, ordinary CI on `main` replays the new cassette for free and passes every check:
+the thresholds, all **8 critical questions including the new `hist-06`**, and the four comparisons with the promoted
+baseline (cost and latency unchanged, +0% / −0%).
 
 ![The live answer after the fix](docs/screenshots/58-live-history-correct-date.png)
 
@@ -639,6 +659,18 @@ $0.14 for months while its sibling Dilantin packages sat at $1.74, and on 30 Sep
 price. That looks like the package catching up with its peers (a CMS rate change or correction), not the *labeler
 price action* the investigator named. Verification checks the numbers, not the story, so a reviewer should reject
 or re-label it.
+
+![Review decisions](docs/screenshots/61b-review-decisions.png)
+
+**What to look for:** the human step done on the live site: finding [1] Dilantin **rejected** (the cause label did not
+fit the history), [2]–[4] **approved**. Decisions are saved to the run folder on Azure Files, so they survive restarts
+and scale-to-zero.
+
+![The published brief](docs/screenshots/61c-published-brief.png)
+
+**What to look for:** *3 approved of 4 signals*. Only the approved findings reach the brief, each with its likely
+cause, confidence, NDC and the tool evidence behind it, at $0.0094 for the whole run. This completes the loop on real
+data: SQL detects, agents explain, code verifies, a person approves, the brief publishes.
 
 #### 10.7 Run it yourself
 
@@ -679,6 +711,7 @@ the app back to whatever tag you give it.
 | SQL proof | 8 read-only queries confirm every count; all error-level data checks pass; 289 rows flagged as a warning |
 | CI | Replayed eval gate on every push: all thresholds, 8 critical questions, no regression vs baseline |
 | Live (Step 10) | Public app + `/mcp` on Container Apps, scales to zero · no API keys anywhere · NADAC as of 2026-10-14 |
+| Price-Watch, live (Step 10.8) | 4 signals · **4/4 verified by code** · **$0.0094 per run** · 3 approved, 1 rejected by the reviewer · brief published |
 | Live evals | Keyless `eval-live` (GitHub OIDC): **39/39** · p95 7.4 s · **$0.00078 per answer** · 2 real-data bugs found live and fixed under the gate |
 
 ### Design principle for the agents
