@@ -164,3 +164,17 @@ def test_search_drugs_matches_words_not_phrase(tools, q, expect):
     """Found on the live app with real data: 'verapamil 120 mg tablets' missed 'VERAPAMIL ER 120 MG TABLET'."""
     out, ok, n = call_tool(tools, "search_drugs", {"query": q})
     assert ok and expect in [r["ndc_description"] for r in json.loads(out)["rows"]]
+
+
+def test_long_price_history_keeps_the_latest_versions():
+    """Found on the live app: verapamil has 34 versions; the first 25 hid the latest change."""
+    from dpa.agent.tools import MAX_ROWS_TO_MODEL, Tool
+
+    history = [{"valid_from": f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}", "nadac_per_unit": i} for i in range(34)]
+    t = Tool("price_history", "", {"type": "object", "properties": {}}, lambda: history, keep="tail")
+    out = json.loads(call_tool({"price_history": t}, "price_history", {})[0])
+    assert out["row_count"] == 34 and len(out["rows"]) == MAX_ROWS_TO_MODEL
+    assert out["rows"][-1] == history[-1] and out["rows"][0] == history[34 - MAX_ROWS_TO_MODEL]
+    assert "latest" in out["note"]
+    ranked = Tool("top", "", {"type": "object", "properties": {}}, lambda: history)
+    assert json.loads(call_tool({"top": ranked}, "top", {})[0])["rows"][0] == history[0]

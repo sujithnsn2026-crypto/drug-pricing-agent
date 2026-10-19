@@ -35,6 +35,9 @@ class Tool:
     description: str
     parameters: dict
     fn: Callable[..., Any]
+    # Which rows survive when a result is longer than MAX_ROWS_TO_MODEL: "head" for ranked
+    # results (best first), "tail" for time-ordered results where the latest rows matter most.
+    keep: str = "head"
 
     def spec(self) -> dict:
         """OpenAI / Azure OpenAI function-calling schema."""
@@ -156,7 +159,7 @@ def build_tools(db: DuckDbGold) -> dict[str, Tool]:
         Tool("price_history",
              "Full price history (SCD Type 2 versions) for one NDC: each price and the dates it was valid.",
              obj({"ndc11": {"type": "string", "description": "11-digit NDC"}}, ["ndc11"]),
-             price_history),
+             price_history, keep="tail"),
         Tool("run_sql",
              "Run one read-only SELECT (DuckDB SQL) when no other tool fits, e.g. counts or averages. "
              "Tables: drug_price_current (one row per active NDC: ndc11, ndc_description, generic_name, "
@@ -193,7 +196,11 @@ def call_tool(tools: dict[str, Tool], name: str, arguments: str | dict) -> tuple
     except Exception as e:  # database errors, timeouts
         return json.dumps({"ok": False, "error": f"query failed: {type(e).__name__}: {str(e)[:300]}"}), False, 0
     truncated = len(rows) > MAX_ROWS_TO_MODEL
-    payload = {"ok": True, "row_count": len(rows), "rows": rows[:MAX_ROWS_TO_MODEL]}
+    # Found on the live app: a 34-version history cut to the FIRST 25 rows hid the latest
+    # price change, and the model reported an old date. Time-ordered tools keep the tail.
+    shown = rows[-MAX_ROWS_TO_MODEL:] if tool.keep == "tail" else rows[:MAX_ROWS_TO_MODEL]
+    payload = {"ok": True, "row_count": len(rows), "rows": shown}
     if truncated:
-        payload["note"] = f"showing first {MAX_ROWS_TO_MODEL} of {len(rows)} rows"
+        payload["note"] = (f"showing the latest {MAX_ROWS_TO_MODEL} of {len(rows)} rows (oldest omitted)"
+                           if tool.keep == "tail" else f"showing first {MAX_ROWS_TO_MODEL} of {len(rows)} rows")
     return json.dumps(payload, default=str), True, len(rows)
