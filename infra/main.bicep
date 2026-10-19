@@ -37,7 +37,7 @@ param deploymentName string = 'gpt-4.1-mini'
 param deploymentSku string = 'GlobalStandard'
 
 @description('Throughput cap in thousands of tokens per minute. Low on purpose: it bounds the worst-case bill.')
-param capacityKTpm int = 10
+param capacityKTpm int = 30
 
 @description('Object ID of the person deploying (az ad signed-in-user show --query id -o tsv), so evals and Price-Watch can run from Cloud Shell without keys. Empty = skip.')
 param deployerPrincipalId string = ''

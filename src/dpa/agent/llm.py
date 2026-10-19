@@ -99,7 +99,7 @@ class AzureOpenAIClient:
             api_key = get_bearer_token_provider(
                 DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default")
         self._client = OpenAI(base_url=f"{endpoint}/openai/v1/", api_key=api_key, timeout=timeout,
-                              max_retries=3)
+                              max_retries=int(os.environ.get("DPA_LLM_MAX_RETRIES", "3")))
 
     def complete(self, messages, tools, model, temperature=None, max_output_tokens=1200) -> LLMResponse:
         kwargs: dict = {"model": model, "messages": messages, "max_completion_tokens": max_output_tokens}

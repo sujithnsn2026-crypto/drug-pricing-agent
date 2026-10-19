@@ -54,7 +54,7 @@ def write_report(out_dir: str, summary: dict, rows: list[dict], items: dict) -> 
     for r in failed:
         ans = (r["answer"] or "").replace("\n", " ")
         lines += [f"**{r['id']}** ({r['score']['category']}): {items[r['id']].question}",
-                  f"- why: {'; '.join(r['score']['failures'])}",
+                  f"- why: {'; '.join(r['score']['failures'])}" + (f" · error: {r['error'][:200]}" if r.get('error') else ""),
                   f"- tools: {', '.join(r['tools_called']) or 'none'}",
                   f"- answer: {ans[:400]}", ""]
     ungrounded = [r for r in rows if r["ungrounded_numbers"]]

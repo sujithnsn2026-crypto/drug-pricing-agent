@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.48.1.52935",
-      "templateHash": "699124557119015604"
+      "templateHash": "3853286959517487610"
     }
   },
   "parameters": {
@@ -65,7 +65,7 @@
     },
     "capacityKTpm": {
       "type": "int",
-      "defaultValue": 10,
+      "defaultValue": 30,
       "metadata": {
         "description": "Throughput cap in thousands of tokens per minute. Low on purpose: it bounds the worst-case bill."
       }

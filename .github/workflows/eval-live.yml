@@ -45,6 +45,7 @@ jobs:
     environment: azure-openai
     env:
       AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      DPA_LLM_MAX_RETRIES: "8"   # back off on 429s (the client honours Retry-After)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,7 +70,7 @@ jobs:
           CASSETTE="evals/cassettes/${MODEL}__ask_agent-${VERSION}.jsonl"
           rm -f "$CASSETTE"   # a fresh recording, so no stale entries survive
           echo "cassette=$CASSETTE" >> "$GITHUB_OUTPUT"
-          dpa-eval run --mode record --model "$MODEL" --prompt-version "$VERSION" --out evals/runs/live --concurrency 4
+          dpa-eval run --mode record --model "$MODEL" --prompt-version "$VERSION" --out evals/runs/live --concurrency 2
       - name: Gate
         run: dpa-eval gate evals/runs/live
       - name: Replay the new cassette (proves CI will reproduce this run exactly)
