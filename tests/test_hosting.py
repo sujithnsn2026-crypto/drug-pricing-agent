@@ -105,5 +105,6 @@ def test_review_page_never_puts_token_in_url(web, tmp_path):
 
 def test_review_page_explains_when_no_run_is_published(web):
     _, c = web
-    page = c.get("/review").text
-    assert "No Price-Watch run has been published" in page and "README Step 6" in page
+    for path in ("/review", "/brief"):
+        r = c.get(path)
+        assert r.status_code == 200 and "No Price-Watch run has been published" in r.text and "README Step 6" in r.text

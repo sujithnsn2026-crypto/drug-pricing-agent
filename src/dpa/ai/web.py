@@ -264,7 +264,7 @@ def api_review(dcs: Decision, x_admin_token: str | None = Header(default=None)) 
 def brief() -> str:
     run = _latest_run()
     if not run:
-        raise HTTPException(404, "No runs yet")
+        return review_page()  # same explanation as the review page, instead of a raw 404
     pricewatch.publish(run)
     return open(os.path.join(run, "brief.html")).read().replace("<h1>", NAV.replace("<nav>", '<nav style="display:flex;gap:14px;font-weight:600">') + "<h1>", 1)
 

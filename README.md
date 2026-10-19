@@ -614,6 +614,14 @@ $0.03 for the whole run.
 **What to look for:** last change **2026-09-23**, current price **$0.08873**, previous **$0.08713**. All three match the
 real snapshot, checked independently with SQL.
 
+![The final revision: scales to zero, managed identity](docs/screenshots/59-final-revision-scale-to-zero.png)
+
+**What to look for:** the live revision with **0–1 replicas** (no compute bill while idle), 1 vCPU and 2 GiB (the
+Gold tables are held in memory), a **system-assigned identity** for keyless model access, and external HTTPS ingress.
+
+**Not finished:** a Price-Watch run on this deployment stalled (see *Known limitations*). The live review page says
+so and links to the verified October run, rather than showing an empty page.
+
 #### 10.7 Run it yourself
 
 ```bash
