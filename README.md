@@ -619,8 +619,26 @@ real snapshot, checked independently with SQL.
 **What to look for:** the live revision with **0–1 replicas** (no compute bill while idle), 1 vCPU and 2 GiB (the
 Gold tables are held in memory), a **system-assigned identity** for keyless model access, and external HTTPS ingress.
 
-**Not finished:** a Price-Watch run on this deployment stalled (see *Known limitations*). The live review page says
-so and links to the verified October run, rather than showing an empty page.
+#### 10.8 Price-Watch on the live deployment
+
+The first two attempts stalled with no output, so Price-Watch gained `--concurrency`, per-investigator progress logs and
+`--verbose` (the OpenAI client's 429 retries and every Azure Identity token request), then ran again with the same
+settings:
+
+![Price-Watch re-run with verbose logging](docs/screenshots/60-pricewatch-rerun-verbose-4-of-4.png)
+
+**What to look for:** keyless sign-in through Cloud Shell's managed identity, four investigators running in parallel,
+each finishing in 6–9 s with no retries: **4 signals, 4 verified by code, 8 model calls, $0.0094**.
+
+![The live Price-Watch review page](docs/screenshots/61-live-pricewatch-review.png)
+
+**What to look for:** the run uploaded to the app's file share and shown live, read-only for visitors. A reviewer
+enters their token to approve or reject. **Finding [1] is why the human step exists.** Code verified every number:
+this Dilantin package went from about $0.14 to $1.73861 (+1,099%). But the history shows it had been priced near
+$0.14 for months while its sibling Dilantin packages sat at $1.74, and on 30 September it moved to exactly their
+price. That looks like the package catching up with its peers (a CMS rate change or correction), not the *labeler
+price action* the investigator named. Verification checks the numbers, not the story, so a reviewer should reject
+or re-label it.
 
 #### 10.7 Run it yourself
 
@@ -850,12 +868,11 @@ These are the parts worth explaining in an interview.
 - Delta MERGE is exercised on Databricks only; locally the same staged rows are applied by
   `apply_staged_local`, which the equality test covers.
 - Shortages are matched to prices by exact NDC. Matching by ingredient (via RxNorm) would catch more.
-- **Open (19 Oct 2026): Price-Watch stalls on the keyless Step 10 deployment.** Run from Cloud Shell with Entra
-  sign-in, the first investigator finished in 6 s and the other three never returned (trace: no further model or tool
-  spans, processes idle). Suspects: concurrent Entra token fetches through the Azure CLI credential, or parallel
-  tool calls over the single shared MCP stdio session. Next step: run with one investigator, then add a per-call
-  timeout and a span around token acquisition. Until then the live review page explains this and links to the
-  verified October run (Step 6).
+- **Resolved, cause unproven (19 Oct 2026): Price-Watch stalled twice on the keyless deployment.** The first
+  investigator finished and the others never returned. A re-run with `--verbose` progress, retry and token logging,
+  at the same concurrency, finished in 9 s with no retries (Step 10.8). The stall did not reproduce. Likeliest
+  causes: the earlier environments (a `pip --user` install mixed into Cloud Shell's own packages, and a run started
+  right after a shell restart). If it recurs, `--verbose` shows whether it is waiting on 429 back-off or on a token.
 
 ## Data sources and terms
 
