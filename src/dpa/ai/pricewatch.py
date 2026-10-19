@@ -17,6 +17,8 @@ import asyncio
 import datetime as dt
 import html
 import json
+import logging
+import time
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -43,6 +45,7 @@ CAUSE_GUIDE = """Pick likely_cause by what the tools showed:
 - market_correction: the change reverses an earlier spike or drop in price_history
 - unknown: the tools do not point to any of the above
 Do not pick supplier_exit unless a tool result actually shows fewer sellers."""
+log = logging.getLogger("dpa.pricewatch")
 INVESTIGATOR_TOOLS = {"search_drugs", "get_drug_price", "top_price_changes", "price_history", "run_sql",
                       "search_labels"}
 
@@ -201,6 +204,8 @@ async def investigate_all(signals: list[dict], llm: LLMClient, model: str, sessi
         agent = MCPAgent(llm, session, INVESTIGATOR_SYSTEM, model, allowed_tools=INVESTIGATOR_TOOLS)
         prompt = "Signal:\n" + json.dumps(sig, default=str, indent=1)
         async with sem:
+            t0 = time.perf_counter()
+            log.info("investigator %d started: %s", i, sig.get("ndc_description"))
             with tracer.start_as_current_span("pricewatch.investigate") as span:
                 span.set_attribute("dpa.ndc11", str(sig["ndc11"]))
                 for attempt in (1, 2):
@@ -222,6 +227,8 @@ async def investigate_all(signals: list[dict], llm: LLMClient, model: str, sessi
                               + "\n- ".join(f.issues) + "\nFix these and return the JSON again.")
                 span.set_attribute("dpa.verified", f.verified)
                 span.set_attribute("dpa.attempts", f.attempts)
+            log.info("investigator %d finished in %.1fs: verified=%s attempts=%d tool_calls=%d", i,
+                     time.perf_counter() - t0, f.verified, f.attempts, f.tool_calls)
         if not f.verified:
             f.status = "failed_verification"
         return f
@@ -231,7 +238,8 @@ async def investigate_all(signals: list[dict], llm: LLMClient, model: str, sessi
 
 
 async def run(days: int, threshold: float, top: int, out_root: str, gold_dir: str, model: str,
-              llm: LLMClient | None = None, env: dict | None = None, min_price: float = 0.0) -> str:
+              llm: LLMClient | None = None, env: dict | None = None, min_price: float = 0.0,
+              concurrency: int = 4) -> str:
     db = DuckDbGold(gold_dir)
     signals = detect(db, days, threshold, top, min_price)
     if llm is None:
@@ -242,7 +250,8 @@ async def run(days: int, threshold: float, top: int, out_root: str, gold_dir: st
     with get_tracer().start_as_current_span("pricewatch.run") as span:
         span.set_attribute("dpa.signals", len(signals))
         async with mcp_session({"DPA_GOLD_DIR": gold_dir, **(env or {})}) as session:
-            findings, usage, calls = await investigate_all(signals, llm, model, session)
+            log.info("%d signals; investigating %d at a time", len(signals), concurrency)
+            findings, usage, calls = await investigate_all(signals, llm, model, session, concurrency=concurrency)
     cost = cost_usd(usage, model, load_prices())
     run_dir = os.path.join(out_root, started.strftime("%Y-%m-%dT%H%M%SZ"))
     os.makedirs(run_dir, exist_ok=True)
@@ -334,6 +343,10 @@ def main() -> None:
     r.add_argument("--out", default="pricewatch_runs")
     r.add_argument("--gold-dir", default=os.environ.get("DPA_GOLD_DIR", DEFAULT_FIXTURE))
     r.add_argument("--model", default=DEFAULT_MODEL, help="Azure OpenAI deployment name")
+    r.add_argument("--concurrency", type=int, default=int(os.environ.get("DPA_PRICEWATCH_CONCURRENCY", "4")),
+                   help="investigators at once; use 1-2 on a deployment with a low tokens-per-minute cap")
+    r.add_argument("--verbose", action="store_true",
+                   help="log progress, OpenAI client retries (429 back-off) and Azure Identity token requests")
     v = sub.add_parser("review")
     v.add_argument("run_dir")
     v.add_argument("--approve", default="")
@@ -344,11 +357,19 @@ def main() -> None:
     a = p.parse_args()
 
     ids = lambda s: [int(x) for x in s.split(",") if x.strip()]  # noqa: E731
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if a.cmd == "run" and a.verbose:
+        logging.getLogger("openai").setLevel(logging.INFO)          # "Retrying request ... in N seconds"
+        logging.getLogger("azure.identity").setLevel(logging.INFO)  # which credential, each token request
+    else:
+        for name in ("openai", "azure", "httpx", "mcp"):
+            logging.getLogger(name).setLevel(logging.WARNING)
     if a.cmd == "run":
         os.makedirs(a.out, exist_ok=True)
         setup_tracing(jsonl_path=os.path.join(a.out, "traces.jsonl"))
         try:
-            run_dir = asyncio.run(run(a.days, a.threshold, a.top, a.out, a.gold_dir, a.model, min_price=a.min_price))
+            run_dir = asyncio.run(run(a.days, a.threshold, a.top, a.out, a.gold_dir, a.model, min_price=a.min_price,
+                                      concurrency=a.concurrency))
         finally:
             shutdown_tracing()
         meta, findings = _load(run_dir)
