@@ -12,6 +12,7 @@ instructions (FDA text fields are untrusted input).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -45,6 +46,13 @@ class ToolError(Exception):
     pass
 
 
+def _fold(word: str) -> str:
+    """Fold simple English plurals so "tablets" matches "TABLET" and "capsules" matches "CAPSULE"."""
+    if len(word) > 4 and word.endswith("s") and not word.endswith("ss") and not word[-2].isdigit():
+        return word[:-1]
+    return word
+
+
 def _clamp_limit(limit: Any, default: int = 10) -> int:
     try:
         return max(1, min(int(limit), MAX_ROWS_TO_MODEL))
@@ -54,17 +62,26 @@ def _clamp_limit(limit: Any, default: int = 10) -> int:
 
 def build_tools(db: DuckDbGold) -> dict[str, Tool]:
     def search_drugs(query: str, limit: int = 10) -> list[dict]:
+        """Every word of the query must appear somewhere in the description, generic or brand name.
+
+        Matching the query as one phrase failed on real CMS text: "verapamil 120 mg tablets"
+        is "VERAPAMIL ER 120 MG TABLET" in NADAC (extra "ER", singular "TABLET"). Words are
+        matched one by one, plurals are folded, and if nothing matches all words, the first
+        word (normally the drug name) is tried alone so the model sees the close candidates.
+        """
         q = (query or "").strip()
         if len(q) < 2:
             raise ToolError("query must be at least 2 characters")
-        like = f"%{q.lower()}%"
-        return db.query(
-            f"SELECT ndc11, ndc_description, generic_name, brand_name, is_generic, current_price, "
-            f"pricing_unit, in_shortage FROM drug_price_current "
-            f"WHERE lower(ndc_description) LIKE ? OR lower(generic_name) LIKE ? OR lower(brand_name) LIKE ? "
-            f"ORDER BY ndc_description LIMIT {_clamp_limit(limit)}",
-            [like, like, like],
-        )
+        words = [_fold(w) for w in re.findall(r"[a-z0-9.%/-]+", q.lower())][:8]
+        words = [w for w in words if w] or [q.lower()]
+        text = "lower(concat_ws(' ', ndc_description, generic_name, brand_name))"
+        base = (f"SELECT ndc11, ndc_description, generic_name, brand_name, is_generic, current_price, "
+                f"pricing_unit, in_shortage FROM drug_price_current WHERE ")
+        tail = f" ORDER BY ndc_description, ndc11 LIMIT {_clamp_limit(limit)}"
+        rows = db.query(base + " AND ".join([f"{text} LIKE ?"] * len(words)) + tail, [f"%{w}%" for w in words])
+        if not rows and len(words) > 1:
+            rows = db.query(base + f"{text} LIKE ?" + tail, [f"%{words[0]}%"])
+        return rows
 
     def get_drug_price(ndc11: str) -> list[dict]:
         digits = "".join(ch for ch in str(ndc11) if ch.isdigit())

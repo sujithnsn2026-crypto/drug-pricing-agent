@@ -152,3 +152,15 @@ def test_grounding_accepts_traceable_numbers(answer):
 def test_grounding_flags_untraceable_numbers(answer, bad):
     g = guardrails.check_grounding(answer, EVIDENCE)
     assert not g.ok and bad in g.ungrounded
+
+
+@pytest.mark.parametrize("q,expect", [
+    ("amoxicillin capsules 500", "AMOXICILLIN 500 MG CAPSULE"),       # words out of order, plural
+    ("methylphenidate 36 mg tablets", "METHYLPHENIDATE ER 36 MG TABLET"),  # extra "ER" in CMS text
+    ("glarvia pens", "GLARVIA 100 UNIT/ML PEN"),
+    ("amoxicillin 875 mg", "AMOXICILLIN 500 MG CAPSULE"),             # no exact match: fall back to the name
+])
+def test_search_drugs_matches_words_not_phrase(tools, q, expect):
+    """Found on the live app with real data: 'verapamil 120 mg tablets' missed 'VERAPAMIL ER 120 MG TABLET'."""
+    out, ok, n = call_tool(tools, "search_drugs", {"query": q})
+    assert ok and expect in [r["ndc_description"] for r in json.loads(out)["rows"]]
