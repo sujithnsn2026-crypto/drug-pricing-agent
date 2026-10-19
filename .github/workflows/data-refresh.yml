@@ -1,0 +1,67 @@
+name: data-refresh
+
+# Rebuilds the real Gold snapshot from public CMS NADAC and FDA data with the same pipeline
+# code that runs on Databricks (local Spark mode), and publishes it as a release asset
+# (release "data-latest", file gold-snapshot.tar.gz). The hosted app reads it from Azure Files.
+#
+# Why here and not Databricks: the hosted demo needs a weekly refresh of a few hundred MB of
+# data. A free GitHub runner (4 vCPU, 16 GB) does that at no cost; Databricks remains the
+# production path (README Steps 1-2) when data or users grow.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 4"  # Thursdays 06:00 UTC: CMS posts the weekly NADAC file on Wednesdays
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DPA_SPARK_DRIVER_MEMORY: 10g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "17"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11", cache: pip}
+      - run: pip install -e ".[dev,agent]"
+      - name: Ingest public data (CMS NADAC, FDA NDC Directory, openFDA shortages)
+        run: python jobs/run.py --local --step ingest
+      - name: Bronze -> Silver -> Gold (data-quality checks gate the Gold publish) -> export
+        run: python jobs/run.py --local --step transform --full-refresh
+      - name: Check the snapshot loads in the agent's locked DuckDB
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          from dpa.agent.data import DuckDbGold
+          db = DuckDbGold("_local/exports/gold")
+          counts = {t: db.query(f"select count(*) n from {t}")[0]["n"]
+                    for t in ("drug_price_current", "fact_price_change", "nadac_price_history")}
+          manifest = {"as_of_date": db.as_of_date(), "row_counts": counts,
+                      "in_shortage": db.query("select count(*) n from drug_price_current where in_shortage")[0]["n"],
+                      "commit": os.environ["GITHUB_SHA"][:7], "built_utc": subprocess.check_output(["date", "-u", "+%FT%TZ"]).decode().strip()}
+          assert counts["drug_price_current"] > 10000, counts
+          json.dump(manifest, open("_local/exports/gold/manifest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+      - name: Package
+        run: |
+          find _local/exports/gold -name "*.crc" -delete -o -name "_SUCCESS" -delete
+          tar -czf gold-snapshot.tar.gz -C _local/exports gold
+          ls -la gold-snapshot.tar.gz
+          { echo "### Gold snapshot"; echo '```json'; cat _local/exports/gold/manifest.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish release data-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Real Gold snapshot built by the data-refresh workflow (run ${{ github.run_number }}). $(python -c "import json;m=json.load(open('_local/exports/gold/manifest.json'));print('NADAC as of', m['as_of_date'], '·', m['row_counts'])")"
+          gh release delete data-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create data-latest gold-snapshot.tar.gz _local/exports/gold/manifest.json \
+            --title "Gold data snapshot (latest)" --notes "$NOTES" --latest=false

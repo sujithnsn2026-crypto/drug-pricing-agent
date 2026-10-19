@@ -35,6 +35,8 @@ def get_spark(local: bool) -> SparkSession:
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.ui.enabled", "false")
+        # Real data (millions of NADAC rows) needs more than Spark's 1 GB default driver heap.
+        .config("spark.driver.memory", os.environ.get("DPA_SPARK_DRIVER_MEMORY", "2g"))
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
