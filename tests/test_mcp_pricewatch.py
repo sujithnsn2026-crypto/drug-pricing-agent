@@ -72,7 +72,7 @@ def test_mcp_agent_round_trip_and_sql_guard():
     assert [st.tool for st in r.steps] == ["run_sql", "run_sql"]
     assert [st.ok for st in r.steps] == [True, False]  # the DROP is rejected by the guard, as data
     tool_msgs = [m for m in llm.calls[-1] if m["role"] == "tool"]
-    assert '"n": 26' in tool_msgs[0]["content"] and '"ok": false' in tool_msgs[1]["content"]
+    assert '"n": 27' in tool_msgs[0]["content"] and '"ok": false' in tool_msgs[1]["content"]
     assert r.answer.startswith("There are 26") and r.usage.input_tokens == 200
 
 

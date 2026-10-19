@@ -1,8 +1,15 @@
 name: eval-live
 
 # Runs the golden set against the real Azure OpenAI deployment, records a fresh cassette,
-# and gates the result. Triggered by hand, weekly (to catch model drift on a fixed
-# deployment), and on PRs that change a prompt or the agent.
+# and gates it. Keyless: GitHub's OIDC token is exchanged for a Microsoft Entra token
+# (federated credential on an app registration that may only call the model). No API key
+# exists anywhere: the Azure OpenAI account has local auth disabled.
+#
+# Triggered by hand (optionally promoting the result), weekly to catch drift on the pinned
+# deployment, and on PRs that change a prompt or the agent.
+#
+# Repository variables (Settings -> Secrets and variables -> Actions -> Variables):
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_OPENAI_ENDPOINT
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +19,10 @@ on:
       prompt_version:
         description: Prompt version to evaluate (default the active one)
         required: false
+      promote:
+        description: If the gate passes, commit the new cassette and make it the baseline
+        type: boolean
+        default: false
   schedule:
     - cron: "30 3 * * 1"  # Mondays 03:30 UTC (09:00 IST)
   pull_request:
@@ -21,7 +32,8 @@ on:
       - "src/dpa/llmops/**"
 
 permissions:
-  contents: read
+  contents: write   # only used by the promote step
+  id-token: write   # OIDC token for azure/login
 
 concurrency:
   group: eval-live-${{ github.ref }}
@@ -32,9 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: azure-openai
     env:
-      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
-      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
-      APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,15 +52,40 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[agent]"
+      - name: Sign in to Azure with OIDC (no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
       - name: Live eval (records a new cassette)
+        id: run
         run: |
-          MODEL="${{ github.event.inputs.model }}"
+          MODEL="${{ inputs.model }}"
           [ -z "$MODEL" ] && MODEL=$(python -c "import yaml;print(yaml.safe_load(open('evals/ci.yaml'))['model'])")
-          ARGS=""
-          [ -n "${{ github.event.inputs.prompt_version }}" ] && ARGS="--prompt-version ${{ github.event.inputs.prompt_version }}"
-          dpa-eval run --mode record --model "$MODEL" $ARGS --out evals/runs/live --concurrency 4
+          VERSION="${{ inputs.prompt_version }}"
+          [ -z "$VERSION" ] && VERSION=$(python -c "import yaml;print(yaml.safe_load(open('prompts/registry.yaml'))['active']['ask_agent'])")
+          CASSETTE="evals/cassettes/${MODEL}__ask_agent-${VERSION}.jsonl"
+          rm -f "$CASSETTE"   # a fresh recording, so no stale entries survive
+          echo "cassette=$CASSETTE" >> "$GITHUB_OUTPUT"
+          dpa-eval run --mode record --model "$MODEL" --prompt-version "$VERSION" --out evals/runs/live --concurrency 4
       - name: Gate
         run: dpa-eval gate evals/runs/live
+      - name: Replay the new cassette (proves CI will reproduce this run exactly)
+        run: |
+          dpa-eval run --mode replay --model "$(python -c "import yaml;print(yaml.safe_load(open('evals/ci.yaml'))['model'])")" \
+            ${{ inputs.prompt_version && format('--prompt-version {0}', inputs.prompt_version) || '' }} --out evals/runs/replay
+          dpa-eval gate evals/runs/replay
+      - name: Promote (commit cassette + baseline)
+        if: ${{ inputs.promote }}
+        run: |
+          dpa-eval promote evals/runs/live
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.run.outputs.cassette }}" evals/baseline
+          git commit -m "Eval: re-recorded ${{ steps.run.outputs.cassette }} and promoted baseline (eval-live run ${{ github.run_number }})"
+          git push origin HEAD:${{ github.ref_name }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

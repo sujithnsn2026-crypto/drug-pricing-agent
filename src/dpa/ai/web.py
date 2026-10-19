@@ -203,8 +203,9 @@ def _latest_run() -> str | None:
 
 
 @app.get("/review", response_class=HTMLResponse)
-def review_page(token: str | None = None) -> str:
-    admin = _is_admin(token)
+def review_page() -> str:
+    # The reviewer token is typed into a password field and sent as a header; it never goes in
+    # a URL (URLs end up in browser history, proxy logs and screenshots). The server checks it.
     run = _latest_run()
     if not run:
         return f"<!doctype html><meta charset=utf-8>{STYLE}<div class=wrap>{NAV}<h1>No Price-Watch runs yet</h1></div>"
@@ -214,8 +215,8 @@ def review_page(token: str | None = None) -> str:
     for f in d["findings"]:
         r = f["report"] or {}
         ev = "".join(f"<li><code>{e(str(x.get('tool')))}</code> {e(str(x.get('finding')))}</li>" for x in r.get("evidence", []))
-        buttons = ("" if not admin or not f["verified"] or f["status"] != "pending_review" else
-                   f"<p><button onclick=\"decide({f['id']},'approve')\">Approve</button> "
+        buttons = ("" if not f["verified"] or f["status"] != "pending_review" else
+                   f"<p class=rev hidden><button onclick=\"decide({f['id']},'approve')\">Approve</button> "
                    f"<button class=ghost onclick=\"decide({f['id']},'reject')\">Reject</button></p>")
         cards.append(f"""<div class=card><b>[{f['id']}] {e(str(r.get('headline') or f['signal']['ndc_description']))}</b>
 <p class=meta><span class="pill{'' if f['verified'] else ' bad'}">{'verified against data' if f['verified'] else 'failed verification'}</span>
@@ -227,9 +228,14 @@ def review_page(token: str | None = None) -> str:
 <title>Price-Watch review</title>{STYLE}<div class=wrap>{NAV}<h1>Price-Watch review</h1>
 <p class=sub>NADAC as of {e(str(m.get('as_of_date')))} · {m['signals']} signals · {m['verified']} verified by code ·
  model {e(str(m['model']))} · cost {('$' + str(m.get('cost_usd'))) if m.get('cost_usd') is not None else 'unknown'}.
- {'Approve findings to include them in the brief.' if admin else 'Read-only view: a reviewer signs in with a token to approve or reject.'}</p>{''.join(cards)}{_footer()}</div>
-<script>async function decide(id,action){{await fetch('api/review',{{method:'POST',headers:{{'Content-Type':'application/json','X-Admin-Token':new URLSearchParams(location.search).get('token')||''}},
-body:JSON.stringify({{run:{json.dumps(os.path.basename(run))},id,action}})}});location.reload();}}</script>"""
+ Read-only for visitors; a reviewer enters their token to approve or reject findings for the brief.</p>
+<form id=rf style="max-width:420px"><input id=tok type=password autocomplete=off placeholder="Reviewer token"><button class=ghost>Review</button></form>
+<p id=rmsg class=meta></p>{''.join(cards)}{_footer()}</div>
+<script>let TOKEN='';document.getElementById('rf').onsubmit=e=>{{e.preventDefault();TOKEN=document.getElementById('tok').value;
+document.querySelectorAll('.rev').forEach(x=>x.hidden=!TOKEN);}};
+async function decide(id,action){{const r=await fetch('api/review',{{method:'POST',headers:{{'Content-Type':'application/json','X-Admin-Token':TOKEN}},
+body:JSON.stringify({{run:{json.dumps(os.path.basename(run))},id,action}})}});
+if(r.ok){{location.reload();}}else{{document.getElementById('rmsg').textContent=r.status==403?'Wrong reviewer token.':'Could not save the decision.';}}}}</script>"""
 
 
 @app.post("/api/review")

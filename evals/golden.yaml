@@ -121,22 +121,31 @@ items:
     category: history
     question: What were the previous prices of cephalexin 500 mg?
     expect: {numbers: [0.0934, 0.1123]}
+  - id: hist-06
+    category: history
+    question: When did the price of warfarin 5 mg tablets last change, and what is it now?
+    expect: {any_of: [["2026-01-02", "january 2, 2026", "2 january 2026", "jan 2, 2026", "january 02, 2026"]],
+             numbers: [0.0606], tools_any: [price_history, get_drug_price, run_sql]}
+    source_sql: SELECT current_price FROM drug_price_current WHERE ndc11 = '70010002201'
+    note: >-
+      35 price versions, more than a tool result shows the model. Regression case for the live bug where
+      a long verapamil history was cut to its oldest 25 rows and the agent reported a stale date.
 
   # ---------------------------------------------------------------- aggregate (needs run_sql)
   - id: agg-01
     category: aggregate
     question: What is the average 90-day price change across all generic drugs?
-    expect: {numbers: [9.6], tools_any: [run_sql]}
+    expect: {numbers: [9.21], tools_any: [run_sql]}
     source_sql: SELECT round(avg(pct_change_90d), 2) FROM drug_price_current WHERE is_generic
   - id: agg-02
     category: aggregate
     question: How many NDCs had a price increase in the last 90 days?
-    expect: {numbers: [12], tools_any: [run_sql, top_price_changes]}
+    expect: {numbers: [13], tools_any: [run_sql, top_price_changes]}
     source_sql: SELECT count(*) FROM drug_price_current WHERE pct_change_90d > 0
   - id: agg-03
     category: aggregate
     question: How many price changes were recorded in 2025?
-    expect: {numbers: [27], tools_any: [run_sql]}
+    expect: {numbers: [53], tools_any: [run_sql]}
     source_sql: SELECT count(*) FROM fact_price_change WHERE year(change_date) = 2025
 
   # ---------------------------------------------------------------- not in data

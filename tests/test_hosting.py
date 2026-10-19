@@ -86,3 +86,18 @@ def test_review_is_read_only_without_admin_token(web):
     assert r.status_code == 403
     r = c.post("/api/review", json={"run": "x", "id": 1, "action": "approve"}, headers={"X-Admin-Token": "adm1n"})
     assert r.status_code == 404  # authorised, but the run doesn't exist
+
+
+def test_review_page_never_puts_token_in_url(web, tmp_path):
+    w, c = web
+    run = tmp_path / "20261019-000000"
+    run.mkdir()
+    (run / "findings.json").write_text(json.dumps({
+        "meta": {"as_of_date": "2026-10-14", "signals": 1, "verified": 1, "model": "m", "cost_usd": 0.01},
+        "findings": [{"id": 1, "verified": True, "status": "pending_review", "issues": [], "tool_calls": 2,
+                      "attempts": 1, "signal": {"ndc_description": "X"},
+                      "report": {"headline": "X rose", "likely_cause": "c", "confidence": "high",
+                                 "explanation": "e", "evidence": []}}]}))
+    page = c.get("/review").text
+    assert "type=password" in page and "X-Admin-Token':TOKEN" in page and "location.search" not in page
+    assert "class=rev hidden" in page  # buttons hidden until a token is entered; the server still checks it

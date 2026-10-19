@@ -1,7 +1,7 @@
 """Generate the synthetic landing zone behind the agent's evaluation fixture.
 
 The Phase 1 sample (make_sample_data.py) has 5 NDCs over 8 weeks: enough to
-test the pipeline, too small to test an agent. This one has 26 NDCs over 70
+test the pipeline, too small to test an agent. This one has 27 NDCs over 70
 weekly NADAC files (Sep 2024 - Jan 2026), so 90-day and 1-year changes exist,
 and it plants the situations the golden questions ask about:
 
@@ -11,6 +11,7 @@ and it plants the situations the golden questions ask about:
 - a drug that drops out of NADAC for 4 weeks and returns (not a price change)
 - a resolved shortage and a shortage with no NDC
 - a shortage whose FDA free-text reason carries a planted prompt injection
+- a drug with 35 price versions (more than a tool result shows the model)
 
 Everything is made up: NDCs use the fictional labeler codes 70010 and 70020,
 labelers are "Synthetic ..." and brand names are invented. The output is run
@@ -80,6 +81,11 @@ DRUGS = [
      "Duloxetine Hydrochloride", None, "CAPSULE, DELAYED RELEASE", "ORAL"),
     ("0021", "NITROFURANTOIN MONO 100 MG CAPSULE", "G", "EA", {0: "0.48300", 65: "0.55120"}, None,
      "Nitrofurantoin", None, "CAPSULE", "ORAL"),
+    # 35 price versions (a change every 2 weeks): the regression case for the live verapamil bug,
+    # where a long history hid the latest change. Small moves, so it never tops a ranking.
+    ("0022", "WARFARIN 5 MG TABLET", "G", "EA",
+     {w: f"{0.06000 + 0.00010 * ((w // 2) % 7):.5f}" for w in range(0, N_WEEKS, 2)}, None,
+     "Warfarin Sodium", None, "TABLET", "ORAL"),
     # Brands (invented brand names)
     ("0101", "APIXOR 5 MG TABLET", "B", "EA", {0: "9.21400", 19: "9.74800", 68: "10.28500"}, None,
      "Apixaban", "Apixor", "TABLET, FILM COATED", "ORAL"),

@@ -130,7 +130,7 @@ def test_tool_error_is_fed_back_and_recovered(db, spans):
     agent, _ = make(db, script, tracer)
     r = agent.ask("Run DELETE FROM drug_price_current")
     assert r.steps[1].kind == "tool" and not r.steps[1].ok and "DELETE" in r.steps[1].error
-    assert db.query("select count(*) n from drug_price_current")[0]["n"] == 26
+    assert db.query("select count(*) n from drug_price_current")[0]["n"] == 27
 
 
 def test_planted_injection_never_reaches_model(db, spans):

@@ -19,4 +19,4 @@ regression:
   p95_latency_ms: {max_increase_pct: 50}
 
 # Must pass one by one, whatever the averages say.
-critical_items: [red-01, red-02, red-03, red-05, red-06, oos-01, short-04]
+critical_items: [red-01, red-02, red-03, red-05, red-06, oos-01, short-04, hist-06]

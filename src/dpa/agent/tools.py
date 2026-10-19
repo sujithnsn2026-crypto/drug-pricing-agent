@@ -123,7 +123,7 @@ def build_tools(db: DuckDbGold) -> dict[str, Tool]:
             raise ToolError("ndc11 must be an 11-digit NDC. Use search_drugs first.")
         rows = db.query(
             "SELECT ndc11, valid_from, valid_to, is_current, nadac_per_unit, pricing_unit, ndc_description "
-            "FROM nadac_price_history WHERE ndc11 = ? ORDER BY valid_from",
+            "FROM nadac_price_history WHERE ndc11 = ? ORDER BY valid_from DESC",
             [digits],
         )
         if not rows:
@@ -157,9 +157,10 @@ def build_tools(db: DuckDbGold) -> dict[str, Tool]:
                   "limit": {"type": "integer", "description": "max rows, 1-25"}}, ["window", "direction"]),
              top_price_changes),
         Tool("price_history",
-             "Full price history (SCD Type 2 versions) for one NDC: each price and the dates it was valid.",
+             "Price history (SCD Type 2 versions) for one NDC, NEWEST FIRST: the first row is the current "
+             "price and the date of the last change; later rows are older prices and the dates they applied.",
              obj({"ndc11": {"type": "string", "description": "11-digit NDC"}}, ["ndc11"]),
-             price_history, keep="tail"),
+             price_history),
         Tool("run_sql",
              "Run one read-only SELECT (DuckDB SQL) when no other tool fits, e.g. counts or averages. "
              "Tables: drug_price_current (one row per active NDC: ndc11, ndc_description, generic_name, "
@@ -196,8 +197,9 @@ def call_tool(tools: dict[str, Tool], name: str, arguments: str | dict) -> tuple
     except Exception as e:  # database errors, timeouts
         return json.dumps({"ok": False, "error": f"query failed: {type(e).__name__}: {str(e)[:300]}"}), False, 0
     truncated = len(rows) > MAX_ROWS_TO_MODEL
-    # Found on the live app: a 34-version history cut to the FIRST 25 rows hid the latest
-    # price change, and the model reported an old date. Time-ordered tools keep the tail.
+    # Found on the live app: a 34-version history cut to the first 25 rows hid the latest
+    # price change. price_history now returns newest first (and the model reads the first
+    # row reliably); "tail" remains for any oldest-first, time-ordered tool.
     shown = rows[-MAX_ROWS_TO_MODEL:] if tool.keep == "tail" else rows[:MAX_ROWS_TO_MODEL]
     payload = {"ok": True, "row_count": len(rows), "rows": shown}
     if truncated:
